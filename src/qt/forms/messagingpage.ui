@@ -1,0 +1,546 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MessagingPage</class>
+ <widget class="QWidget" name="MessagingPage">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>680</width>
+    <height>420</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Messaging</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QTabWidget" name="tabWidget">
+     <property name="currentIndex">
+      <number>0</number>
+     </property>
+     <!-- OP_RETURN Messages Tab -->
+     <widget class="QWidget" name="tabOpReturn">
+      <attribute name="title">
+       <string>On-Chain Messages</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutOpReturn">
+       <item>
+        <widget class="QGroupBox" name="groupSendOpReturn">
+         <property name="title">
+          <string>Send On-Chain Message (OP_RETURN)</string>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayoutSend">
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutEncrypt">
+            <item>
+             <widget class="QCheckBox" name="checkBoxEncrypt">
+              <property name="text">
+               <string>Encrypt message (only recipient can read)</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutRecipient">
+            <item>
+             <widget class="QLabel" name="labelRecipient">
+              <property name="text">
+               <string>To:</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLineEdit" name="lineEditRecipient">
+              <property name="placeholderText">
+               <string>Recipient address (required for encrypted messages)</string>
+              </property>
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutOpReturnMsg">
+            <item>
+             <widget class="QLineEdit" name="lineEditOpReturnMessage">
+              <property name="placeholderText">
+               <string>Enter message (max 76 characters, stored permanently on blockchain)</string>
+              </property>
+              <property name="maxLength">
+               <number>76</number>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QLabel" name="labelCharCount">
+              <property name="text">
+               <string>0/76</string>
+              </property>
+              <property name="minimumWidth">
+               <number>50</number>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutOpReturnBtn">
+            <item>
+             <spacer name="horizontalSpacer">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonSendOpReturn">
+              <property name="text">
+               <string>Send Message (creates transaction)</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupOpReturnHistory">
+         <property name="title">
+          <string>Message History</string>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayoutHistory">
+          <item>
+           <widget class="QTableWidget" name="tableOpReturnMessages">
+            <property name="selectionBehavior">
+             <enum>QAbstractItemView::SelectRows</enum>
+            </property>
+            <property name="selectionMode">
+             <enum>QAbstractItemView::SingleSelection</enum>
+            </property>
+            <property name="sortingEnabled">
+             <bool>true</bool>
+            </property>
+            <column>
+             <property name="text">
+              <string>Date</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string>Type</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string>Message</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string>Transaction ID</string>
+             </property>
+            </column>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <!-- P2P Chat Tab -->
+     <widget class="QWidget" name="tabP2PChat">
+      <attribute name="title">
+       <string>Encrypted Chat</string>
+      </attribute>
+      <layout class="QHBoxLayout" name="horizontalLayoutP2P">
+       <!-- Conversation List -->
+       <item>
+        <widget class="QWidget" name="widgetConversations">
+         <property name="maximumWidth">
+          <number>250</number>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayoutConvosOuter">
+          <property name="spacing">
+           <number>4</number>
+          </property>
+          <property name="margin">
+           <number>0</number>
+          </property>
+          <!-- Conversations Header with Refresh Icon -->
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutConvoHeader">
+            <item>
+             <widget class="QLabel" name="labelConversations">
+              <property name="text">
+               <string>Conversations</string>
+              </property>
+              <property name="font">
+               <font>
+                <bold>true</bold>
+               </font>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonRefreshP2P">
+              <property name="text">
+               <string>↻</string>
+              </property>
+              <property name="maximumWidth">
+               <number>28</number>
+              </property>
+              <property name="maximumHeight">
+               <number>28</number>
+              </property>
+              <property name="toolTip">
+               <string>Refresh conversations</string>
+              </property>
+              <property name="flat">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="horizontalSpacerConvoHeader">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+             </spacer>
+            </item>
+           </layout>
+          </item>
+          <!-- Pending Requests Section -->
+          <item>
+           <widget class="QListWidget" name="listPendingRequests">
+            <property name="maximumHeight">
+             <number>80</number>
+            </property>
+            <property name="visible">
+             <bool>false</bool>
+            </property>
+            <property name="styleSheet">
+             <string>QListWidget { background-color: #fff3cd; border: 1px solid #ffc107; }</string>
+            </property>
+           </widget>
+          </item>
+          <!-- Conversation List -->
+          <item>
+           <widget class="QListWidget" name="listConversations">
+            <property name="contextMenuPolicy">
+             <enum>Qt::CustomContextMenu</enum>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="pushButtonNewConversation">
+            <property name="text">
+             <string>New Conversation</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="pushButtonKeyExchange">
+            <property name="text">
+             <string>Start Secure Chat</string>
+            </property>
+            <property name="toolTip">
+             <string>Exchange encryption keys with this contact for secure messaging</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <!-- Chat Area -->
+       <item>
+        <widget class="QGroupBox" name="groupChat">
+         <property name="title">
+          <string>Chat</string>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayoutChat">
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutChatHeader">
+            <item>
+             <widget class="QLabel" name="labelChatPeer">
+              <property name="text">
+               <string>Select a conversation to start chatting</string>
+              </property>
+              <property name="font">
+               <font>
+                <bold>true</bold>
+               </font>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <spacer name="horizontalSpacerChatHeader">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonInviteUser">
+              <property name="text">
+               <string>+ Invite</string>
+              </property>
+              <property name="maximumWidth">
+               <number>70</number>
+              </property>
+              <property name="toolTip">
+               <string>Invite another user to this encrypted chat</string>
+              </property>
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonManageGroup">
+              <property name="text">
+               <string>👥</string>
+              </property>
+              <property name="maximumWidth">
+               <number>32</number>
+              </property>
+              <property name="toolTip">
+               <string>Manage group members and permissions</string>
+              </property>
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonChatBackground">
+              <property name="text">
+               <string>🎨</string>
+              </property>
+              <property name="maximumWidth">
+               <number>32</number>
+              </property>
+              <property name="toolTip">
+               <string>Change chat background color</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <widget class="QTextBrowser" name="textBrowserChat">
+            <property name="openExternalLinks">
+             <bool>false</bool>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutIdentity">
+            <item>
+             <widget class="QLabel" name="labelSendAs">
+              <property name="text">
+               <string>Send as:</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QComboBox" name="comboBoxIdentity">
+              <property name="sizePolicy">
+               <sizepolicy hsizetype="Expanding" vsizetype="Fixed">
+                <horstretch>1</horstretch>
+                <verstretch>0</verstretch>
+               </sizepolicy>
+              </property>
+              <property name="minimumWidth">
+               <number>300</number>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonRefreshIdentities">
+              <property name="text">
+               <string>↻</string>
+              </property>
+              <property name="maximumWidth">
+               <number>30</number>
+              </property>
+              <property name="flat">
+               <bool>true</bool>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <layout class="QHBoxLayout" name="horizontalLayoutChatInput">
+            <item>
+             <widget class="QLineEdit" name="lineEditChatMessage">
+              <property name="placeholderText">
+               <string>Type your encrypted message...</string>
+              </property>
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonSendP2P">
+              <property name="text">
+               <string>Send</string>
+              </property>
+              <property name="enabled">
+               <bool>false</bool>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+     <!-- Transaction Memos Tab -->
+     <widget class="QWidget" name="tabMemos">
+      <attribute name="title">
+       <string>Transaction Memos</string>
+      </attribute>
+      <layout class="QVBoxLayout" name="verticalLayoutMemos">
+       <item>
+        <widget class="QGroupBox" name="groupAddMemo">
+         <property name="title">
+          <string>Add/Edit Memo</string>
+         </property>
+         <layout class="QGridLayout" name="gridLayoutMemo">
+          <item row="0" column="0">
+           <widget class="QLabel" name="labelTxId">
+            <property name="text">
+             <string>Transaction ID:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QLineEdit" name="lineEditMemoTxId">
+            <property name="placeholderText">
+             <string>Enter transaction ID or paste from history</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QLabel" name="labelMemo">
+            <property name="text">
+             <string>Memo:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="1">
+           <widget class="QTextEdit" name="textEditMemo">
+            <property name="placeholderText">
+             <string>Enter your memo (stored locally only, not on blockchain)</string>
+            </property>
+            <property name="maximumHeight">
+             <number>80</number>
+            </property>
+           </widget>
+          </item>
+          <item row="2" column="1">
+           <layout class="QHBoxLayout" name="horizontalLayoutMemoButtons">
+            <item>
+             <spacer name="horizontalSpacerMemo">
+              <property name="orientation">
+               <enum>Qt::Horizontal</enum>
+              </property>
+             </spacer>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonDeleteMemo">
+              <property name="text">
+               <string>Delete</string>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="pushButtonSaveMemo">
+              <property name="text">
+               <string>Save Memo</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupMemoSearch">
+         <property name="title">
+          <string>Search Memos</string>
+         </property>
+         <layout class="QHBoxLayout" name="horizontalLayoutSearch">
+          <item>
+           <widget class="QLineEdit" name="lineEditMemoSearch">
+            <property name="placeholderText">
+             <string>Search in memos...</string>
+            </property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="pushButtonSearchMemo">
+            <property name="text">
+             <string>Search</string>
+            </property>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+       <item>
+        <widget class="QGroupBox" name="groupMemoList">
+         <property name="title">
+          <string>Saved Memos</string>
+         </property>
+         <layout class="QVBoxLayout" name="verticalLayoutMemoList">
+          <item>
+           <widget class="QTableWidget" name="tableMemos">
+            <property name="selectionBehavior">
+             <enum>QAbstractItemView::SelectRows</enum>
+            </property>
+            <property name="selectionMode">
+             <enum>QAbstractItemView::SingleSelection</enum>
+            </property>
+            <property name="sortingEnabled">
+             <bool>true</bool>
+            </property>
+            <column>
+             <property name="text">
+              <string>Transaction ID</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string>Memo</string>
+             </property>
+            </column>
+            <column>
+             <property name="text">
+              <string>Date Added</string>
+             </property>
+            </column>
+           </widget>
+          </item>
+         </layout>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

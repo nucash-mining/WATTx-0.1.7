@@ -1,0 +1,20 @@
+{
+  "name": "private-bridge",
+  "version": "1.0.0",
+  "description": "Anonymous cross-chain token transfers using ZK-SNARKs",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "privacy",
+    "bridge",
+    "cross-chain",
+    "zk-snarks",
+    "ethereum",
+    "polygon"
+  ],
+  "author": "WATTx",
+  "license": "MIT"
+}

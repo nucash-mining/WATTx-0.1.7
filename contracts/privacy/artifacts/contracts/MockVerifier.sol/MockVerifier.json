@@ -1,0 +1,61 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "MockVerifier",
+  "sourceName": "contracts/MockVerifier.sol",
+  "abi": [
+    {
+      "inputs": [],
+      "name": "mockResult",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bool",
+          "name": "_result",
+          "type": "bool"
+        }
+      ],
+      "name": "setMockResult",
+      "outputs": [],
+      "stateMutability": "nonpayable",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256[8]",
+          "name": "",
+          "type": "uint256[8]"
+        },
+        {
+          "internalType": "uint256[4]",
+          "name": "",
+          "type": "uint256[4]"
+        }
+      ],
+      "name": "verifyProof",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "valid",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x6080806040523461002257600160ff19600054161760005560f490816100288239f35b600080fdfe6080806040526004361015601257600080fd5b600090813560e01c9081632357251114608f575080637a0b5f8514606f5763b089c1be14603e57600080fd5b34606c576020366003190112606c5760043580151580910360685760ff8019835416911617815580f35b5080fd5b80fd5b5034606c5780600319360112606c5760ff60209154166040519015158152f35b9050346068576101803660031901126068573661010411606857366101841160685760ff602092541615158152f3fea2646970667358221220f45effa0f1817b5d1e76fd14e3a742486899f8ace8cd75f1a71098b0de66c2b364736f6c63430008140033",
+  "deployedBytecode": "0x6080806040526004361015601257600080fd5b600090813560e01c9081632357251114608f575080637a0b5f8514606f5763b089c1be14603e57600080fd5b34606c576020366003190112606c5760043580151580910360685760ff8019835416911617815580f35b5080fd5b80fd5b5034606c5780600319360112606c5760ff60209154166040519015158152f35b9050346068576101803660031901126068573661010411606857366101841160685760ff602092541615158152f3fea2646970667358221220f45effa0f1817b5d1e76fd14e3a742486899f8ace8cd75f1a71098b0de66c2b364736f6c63430008140033",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}

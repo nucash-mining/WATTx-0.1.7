@@ -1,0 +1,13 @@
+build/
+build-win/
+build-win64/
+*.o
+*.a
+*.so
+*.dylib
+.DS_Store
+*.pyc
+__pycache__/
+release/
+*.exe
+*.tar.gz

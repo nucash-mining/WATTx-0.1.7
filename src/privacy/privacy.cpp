@@ -1,0 +1,409 @@
+// Copyright (c) 2024-2026 The WATTx Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <privacy/privacy.h>
+#include <privacy/ed25519/ed25519_types.h>
+#include <hash.h>
+#include <consensus/params.h>
+#include <script/solver.h>
+
+#include <map>
+#include <mutex>
+
+namespace privacy {
+
+// Key image tracking (in production, this would be in the UTXO database)
+static std::map<uint256, uint256> g_spentKeyImages; // keyImage hash -> tx hash
+static std::mutex g_keyImageMutex;
+
+bool IsKeyImageSpent(const CKeyImage& keyImage)
+{
+    std::lock_guard<std::mutex> lock(g_keyImageMutex);
+    return g_spentKeyImages.count(keyImage.GetHash()) > 0;
+}
+
+bool MarkKeyImageSpent(const CKeyImage& keyImage, const uint256& txHash)
+{
+    std::lock_guard<std::mutex> lock(g_keyImageMutex);
+    auto result = g_spentKeyImages.emplace(keyImage.GetHash(), txHash);
+    return result.second; // true if inserted, false if already exists
+}
+
+size_t GetMinRingSize(int height)
+{
+    // Minimum ring size increases over time for better privacy
+    if (height < 100000) return 3;
+    if (height < 500000) return 7;
+    return 11;
+}
+
+size_t GetDefaultRingSize(int height)
+{
+    // Default ring size for new transactions
+    return std::max(GetMinRingSize(height), size_t(11));
+}
+
+CPrivacyTransactionBuilder::CPrivacyTransactionBuilder(PrivacyType type)
+    : m_type(type), m_ringSize(11)
+{
+}
+
+bool CPrivacyTransactionBuilder::AddInput(
+    const COutPoint& outpoint,
+    const CKey& privKey,
+    CAmount amount,
+    const CBlindingFactor& blindingFactor)
+{
+    m_inputs.emplace_back(outpoint, privKey, amount, blindingFactor);
+    return true;
+}
+
+bool CPrivacyTransactionBuilder::AddOutput(
+    const CStealthAddress& stealthAddr,
+    CAmount amount)
+{
+    if (!stealthAddr.IsValid() || amount <= 0) {
+        return false;
+    }
+    m_stealthOutputs.emplace_back(stealthAddr, amount);
+    return true;
+}
+
+bool CPrivacyTransactionBuilder::AddOutput(
+    const CScript& scriptPubKey,
+    CAmount amount)
+{
+    if (scriptPubKey.empty() || amount <= 0) {
+        return false;
+    }
+    m_standardOutputs.emplace_back(scriptPubKey, amount);
+    return true;
+}
+
+void CPrivacyTransactionBuilder::SetFee(CAmount fee)
+{
+    m_fee = fee;
+}
+
+void CPrivacyTransactionBuilder::SetRingSize(size_t size)
+{
+    m_ringSize = std::max(size, size_t(3));
+}
+
+std::optional<CPrivacyTransaction> CPrivacyTransactionBuilder::Build()
+{
+    if (m_inputs.empty()) {
+        return std::nullopt;
+    }
+
+    if (m_stealthOutputs.empty() && m_standardOutputs.empty()) {
+        return std::nullopt;
+    }
+
+    CPrivacyTransaction tx;
+    tx.privacyType = m_type;
+    tx.nFee = m_fee;
+
+    // Calculate totals
+    CAmount inputTotal = 0;
+    for (const auto& [outpoint, privKey, amount, blind] : m_inputs) {
+        inputTotal += amount;
+    }
+
+    CAmount outputTotal = 0;
+    for (const auto& [addr, amount] : m_stealthOutputs) {
+        outputTotal += amount;
+    }
+    for (const auto& [script, amount] : m_standardOutputs) {
+        outputTotal += amount;
+    }
+
+    if (inputTotal < outputTotal + m_fee) {
+        return std::nullopt; // Insufficient funds
+    }
+
+    // Build inputs
+    for (const auto& [outpoint, privKey, amount, blind] : m_inputs) {
+        CPrivacyInput input;
+
+        // For ring signatures, we need to select decoys
+        if (m_type == PrivacyType::RING || m_type == PrivacyType::RINGCT) {
+            // Add real output as first member
+            CRingMember realMember(outpoint, privKey.GetPubKey());
+            input.ring.members.push_back(realMember);
+
+            // Select decoys (placeholder - needs UTXO access)
+            std::vector<CRingMember> decoys;
+            SelectDecoys(outpoint, m_ringSize - 1, decoys);
+            for (const auto& decoy : decoys) {
+                input.ring.members.push_back(decoy);
+            }
+
+            // Generate key image
+            GenerateKeyImage(privKey, privKey.GetPubKey(), input.keyImage);
+        }
+
+        // For confidential, create commitment
+        if (m_type == PrivacyType::CONFIDENTIAL || m_type == PrivacyType::RINGCT) {
+            CBlindingFactor bf = blind.IsValid() ? blind : CBlindingFactor::Random();
+            CreateCommitment(amount, bf, input.commitment);
+        }
+
+        tx.privacyInputs.push_back(input);
+    }
+
+    // Build outputs
+    std::vector<CBlindingFactor> outputBlinds;
+    std::vector<CAmount> outputAmounts;
+    std::vector<CPedersenCommitment> outputCommitments;
+
+    for (const auto& [stealthAddr, amount] : m_stealthOutputs) {
+        CPrivacyOutput output;
+
+        // Generate stealth destination
+        CKey ephemeralKey;
+        GenerateStealthDestination(stealthAddr, ephemeralKey, output.stealthOutput);
+
+        output.nValue = amount;
+
+        // For confidential, create commitment
+        if (m_type == PrivacyType::CONFIDENTIAL || m_type == PrivacyType::RINGCT) {
+            CBlindingFactor bf = CBlindingFactor::Random();
+            CreateCommitment(amount, bf, output.confidentialOutput.commitment);
+            outputBlinds.push_back(bf);
+            outputAmounts.push_back(amount);
+            outputCommitments.push_back(output.confidentialOutput.commitment);
+        }
+
+        tx.privacyOutputs.push_back(output);
+    }
+
+    for (const auto& [script, amount] : m_standardOutputs) {
+        CPrivacyOutput output;
+        output.scriptPubKey = script;
+        output.nValue = amount;
+
+        if (m_type == PrivacyType::CONFIDENTIAL || m_type == PrivacyType::RINGCT) {
+            CBlindingFactor bf = CBlindingFactor::Random();
+            CreateCommitment(amount, bf, output.confidentialOutput.commitment);
+            outputBlinds.push_back(bf);
+            outputAmounts.push_back(amount);
+            outputCommitments.push_back(output.confidentialOutput.commitment);
+        }
+
+        tx.privacyOutputs.push_back(output);
+    }
+
+    // Create range proofs
+    if (!outputCommitments.empty()) {
+        CreateAggregatedRangeProof(outputAmounts, outputBlinds, outputCommitments,
+                                    tx.aggregatedRangeProof);
+    }
+
+    // Create MLSAG signature (placeholder - needs full implementation)
+    if (m_type == PrivacyType::RING || m_type == PrivacyType::RINGCT) {
+        std::vector<CRing> rings;
+        std::vector<size_t> realIndices;
+        std::vector<CKey> privKeys;
+
+        for (size_t i = 0; i < tx.privacyInputs.size(); i++) {
+            rings.push_back(tx.privacyInputs[i].ring);
+            realIndices.push_back(0); // Real is always first in our construction
+            privKeys.push_back(std::get<1>(m_inputs[i]));
+        }
+
+        uint256 txHash = tx.GetHash();
+        CreateMLSAGSignature(txHash, rings, realIndices, privKeys, tx.mlsagSig);
+    }
+
+    return tx;
+}
+
+uint256 CPrivacyTransaction::GetHash() const
+{
+    HashWriter hasher;
+    hasher << nVersion << static_cast<uint8_t>(privacyType);
+
+    // Hash ring-based inputs
+    for (const auto& input : privacyInputs) {
+        hasher << input.keyImage;
+    }
+
+    // Hash FCMP inputs
+    for (const auto& input : fcmpInputs) {
+        hasher << input.keyImage;
+        hasher << input.inputTuple.O_tilde.data;
+        hasher << input.inputTuple.I_tilde.data;
+        hasher << input.inputTuple.C_tilde.data;
+    }
+
+    for (const auto& output : privacyOutputs) {
+        if (output.stealthOutput.oneTimePubKey.IsValid()) {
+            hasher << output.stealthOutput.oneTimePubKey;
+        }
+        if (output.confidentialOutput.IsValid()) {
+            hasher << output.confidentialOutput.commitment.data;
+        }
+        hasher << output.scriptPubKey << output.nValue;
+    }
+
+    hasher << nFee << nLockTime;
+
+    return hasher.GetHash();
+}
+
+bool CPrivacyTransaction::Verify() const
+{
+    // Handle FCMP transactions
+    if (privacyType == PrivacyType::FCMP) {
+        return VerifyFcmp();
+    }
+
+    // Verify key images are not spent (for ring signature types)
+    for (const auto& input : privacyInputs) {
+        if (input.keyImage.IsValid() && IsKeyImageSpent(input.keyImage)) {
+            return false;
+        }
+    }
+
+    // Verify ring signatures (if applicable)
+    if (privacyType == PrivacyType::RING || privacyType == PrivacyType::RINGCT) {
+        uint256 txHash = GetHash();
+        if (!VerifyMLSAGSignature(txHash, mlsagSig)) {
+            return false;
+        }
+    }
+
+    // Verify commitment balance (if applicable)
+    if (privacyType == PrivacyType::CONFIDENTIAL || privacyType == PrivacyType::RINGCT) {
+        std::vector<CPedersenCommitment> inputCommitments;
+        for (const auto& input : privacyInputs) {
+            if (input.commitment.IsValid()) {
+                inputCommitments.push_back(input.commitment);
+            }
+        }
+
+        std::vector<CPedersenCommitment> outputCommitments;
+        for (const auto& output : privacyOutputs) {
+            if (output.confidentialOutput.IsValid()) {
+                outputCommitments.push_back(output.confidentialOutput.commitment);
+            }
+        }
+
+        if (!inputCommitments.empty() && !outputCommitments.empty()) {
+            // TODO: Add fee commitment
+            if (!VerifyCommitmentBalance(inputCommitments, outputCommitments)) {
+                return false;
+            }
+        }
+
+        // Verify range proofs
+        if (!outputCommitments.empty() && aggregatedRangeProof.IsValid()) {
+            if (!VerifyAggregatedRangeProof(outputCommitments, aggregatedRangeProof)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+bool CPrivacyTransaction::VerifyFcmp() const
+{
+    // 1. Check FCMP inputs exist
+    if (fcmpInputs.empty()) {
+        return false;
+    }
+
+    // 2. Verify key images are not spent
+    for (const auto& input : fcmpInputs) {
+        if (!input.keyImage.IsValid()) {
+            return false;
+        }
+        if (IsKeyImageSpent(input.keyImage)) {
+            return false;
+        }
+    }
+
+    // 3. Get transaction hash for signature verification
+    uint256 txHash = GetHash();
+
+    // 4. Get tree root (in production, this would come from chain state)
+    // For now, use the root from the first input's proof
+    if (!fcmpInputs[0].membershipProof.IsValid()) {
+        return false;
+    }
+    ed25519::Point treeRoot = fcmpInputs[0].membershipProof.treeRoot;
+
+    // 5. Batch verify all FCMP inputs
+    if (!BatchVerifyFcmpInputs(fcmpInputs, treeRoot, txHash)) {
+        return false;
+    }
+
+    // 6. Verify commitment balance
+    std::vector<CPedersenCommitment> outputCommitments;
+    for (const auto& output : privacyOutputs) {
+        if (output.confidentialOutput.IsValid()) {
+            outputCommitments.push_back(output.confidentialOutput.commitment);
+        }
+    }
+
+    if (!outputCommitments.empty()) {
+        if (!VerifyFcmpBalance(fcmpInputs, outputCommitments, nFee)) {
+            return false;
+        }
+
+        // 7. Verify range proofs
+        if (aggregatedRangeProof.IsValid()) {
+            if (!VerifyAggregatedRangeProof(outputCommitments, aggregatedRangeProof)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+CTransaction CPrivacyTransaction::ToTransaction() const
+{
+    // TODO: Convert to standard transaction format
+    // This would encode privacy data in OP_RETURN outputs or special scripts
+    CMutableTransaction mtx;
+    mtx.version = nVersion;
+    mtx.nLockTime = nLockTime;
+
+    // Encode inputs
+    for (const auto& input : privacyInputs) {
+        if (!input.ring.members.empty()) {
+            // Use first ring member's outpoint as the input reference
+            CTxIn vin(input.ring.members[0].outpoint);
+            mtx.vin.push_back(vin);
+        }
+    }
+
+    // Encode outputs
+    for (const auto& output : privacyOutputs) {
+        CTxOut vout;
+        if (!output.scriptPubKey.empty()) {
+            vout.scriptPubKey = output.scriptPubKey;
+            vout.nValue = output.nValue;
+        } else if (output.stealthOutput.oneTimePubKey.IsValid()) {
+            // Create P2PK script for stealth output
+            vout.scriptPubKey = GetScriptForRawPubKey(output.stealthOutput.oneTimePubKey);
+            vout.nValue = output.nValue;
+        }
+        mtx.vout.push_back(vout);
+    }
+
+    return CTransaction(mtx);
+}
+
+std::optional<CPrivacyTransaction> CPrivacyTransaction::FromTransaction(const CTransaction& tx)
+{
+    // TODO: Parse privacy data from transaction
+    // This would look for special markers and decode accordingly
+    return std::nullopt;
+}
+
+} // namespace privacy

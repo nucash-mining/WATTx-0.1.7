@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Private Bridge - Anonymous Cross-Chain Transfers</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+                    <circle cx="16" cy="16" r="14" stroke="url(#gradient)" stroke-width="2"/>
+                    <path d="M10 16L14 20L22 12" stroke="url(#gradient)" stroke-width="2" stroke-linecap="round"/>
+                    <defs>
+                        <linearGradient id="gradient" x1="0" y1="0" x2="32" y2="32">
+                            <stop offset="0%" stop-color="#6366f1"/>
+                            <stop offset="100%" stop-color="#22c55e"/>
+                        </linearGradient>
+                    </defs>
+                </svg>
+                <span>Private Bridge</span>
+            </div>
+            <div class="header-right">
+                <div id="network-badge" class="network-badge hidden">
+                    <span class="network-dot"></span>
+                    <span id="network-name">--</span>
+                </div>
+                <button id="connect-wallet" class="btn btn-primary">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="2" y="6" width="20" height="12" rx="2"/>
+                        <path d="M22 10h-4a2 2 0 000 4h4"/>
+                    </svg>
+                    <span>Connect Wallet</span>
+                </button>
+                <div id="wallet-connected" class="wallet-info hidden">
+                    <span id="wallet-address"></span>
+                    <button id="disconnect-btn" class="btn-icon" title="Disconnect">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/>
+                            <polyline points="16,17 21,12 16,7"/>
+                            <line x1="21" y1="12" x2="9" y2="12"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main">
+            <!-- Tab Navigation -->
+            <nav class="tabs">
+                <button class="tab active" data-tab="shield">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                    </svg>
+                    Shield
+                </button>
+                <button class="tab" data-tab="transfer">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M7 17l9.2-9.2M17 17V7H7"/>
+                    </svg>
+                    Transfer
+                </button>
+                <button class="tab" data-tab="unshield">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+                        <path d="M7 11V7a5 5 0 0110 0v4"/>
+                    </svg>
+                    Unshield
+                </button>
+                <button class="tab" data-tab="notes">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                        <polyline points="14,2 14,8 20,8"/>
+                    </svg>
+                    Notes
+                </button>
+            </nav>
+
+            <!-- Shield Tab (Deposit) -->
+            <section id="shield-tab" class="tab-content active">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Shield Tokens</h2>
+                        <p>Deposit tokens to receive a private note for anonymous transfers</p>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Source Chain</label>
+                        <div class="chain-selector" id="shield-chain-selector">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Token</label>
+                        <div class="token-select">
+                            <select id="shield-token">
+                                <option value="usdt">USDT</option>
+                                <option value="usdc">USDC</option>
+                                <option value="dai">DAI</option>
+                            </select>
+                            <span class="token-balance">Balance: <span id="token-balance">--</span></span>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Amount</label>
+                        <div class="amount-input-group">
+                            <input type="number" id="shield-amount" placeholder="0.00" min="0" step="0.01">
+                            <button class="btn-max" id="shield-max">MAX</button>
+                        </div>
+                        <div class="amount-presets">
+                            <button class="preset" data-amount="100">100</button>
+                            <button class="preset" data-amount="1000">1K</button>
+                            <button class="preset" data-amount="10000">10K</button>
+                            <button class="preset" data-amount="100000">100K</button>
+                        </div>
+                    </div>
+
+                    <div class="fee-summary">
+                        <div class="fee-row">
+                            <span>Shielding Fee (0.1%)</span>
+                            <span id="shield-fee">0.00</span>
+                        </div>
+                        <div class="fee-row total">
+                            <span>You'll Receive (Private)</span>
+                            <span id="shield-receive">0.00</span>
+                        </div>
+                    </div>
+
+                    <div class="button-group">
+                        <button id="approve-btn" class="btn btn-secondary btn-lg">Approve</button>
+                        <button id="shield-btn" class="btn btn-primary btn-lg" disabled>Shield Tokens</button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Transfer Tab (Cross-chain) -->
+            <section id="transfer-tab" class="tab-content">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Private Transfer</h2>
+                        <p>Transfer shielded tokens to another chain anonymously</p>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Your Secret Note</label>
+                        <div class="note-input-group">
+                            <textarea id="transfer-note" placeholder="Paste your secret note here or load from file..."></textarea>
+                            <div class="note-actions">
+                                <button class="btn-icon" id="load-transfer-note" title="Load from file">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                                        <polyline points="17,8 12,3 7,8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                </button>
+                                <input type="file" id="transfer-note-file" accept=".json,.txt" class="hidden">
+                            </div>
+                        </div>
+                        <div id="note-info" class="note-info hidden">
+                            <div class="info-row"><span>Chain:</span><span id="note-chain">--</span></div>
+                            <div class="info-row"><span>Amount:</span><span id="note-amount">--</span></div>
+                            <div class="info-row"><span>Status:</span><span id="note-status">--</span></div>
+                        </div>
+                    </div>
+
+                    <div class="transfer-arrow">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"/>
+                            <polyline points="19,12 12,19 5,12"/>
+                        </svg>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Destination Chain</label>
+                        <div class="chain-selector" id="transfer-dest-chain-selector">
+                            <!-- Populated by JS -->
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Recipient Address</label>
+                        <div class="address-input-group">
+                            <input type="text" id="transfer-recipient" placeholder="0x...">
+                            <button class="btn-small" id="use-my-address">Use My Address</button>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Amount to Transfer</label>
+                        <input type="number" id="transfer-amount" placeholder="0.00" min="0" step="0.01">
+                        <small class="pool-info">Pool liquidity: <span id="dest-pool-liquidity">--</span></small>
+                    </div>
+
+                    <div class="fee-summary">
+                        <div class="fee-row">
+                            <span>Bridge Fee (0.15%)</span>
+                            <span id="transfer-fee">0.00</span>
+                        </div>
+                        <div class="fee-row total">
+                            <span>Recipient Receives</span>
+                            <span id="transfer-receive">0.00</span>
+                        </div>
+                    </div>
+
+                    <button id="transfer-btn" class="btn btn-primary btn-lg btn-full" disabled>
+                        Transfer Anonymously
+                    </button>
+                </div>
+            </section>
+
+            <!-- Unshield Tab (Withdraw) -->
+            <section id="unshield-tab" class="tab-content">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Unshield Tokens</h2>
+                        <p>Withdraw your private tokens to any address</p>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Your Secret Note</label>
+                        <div class="note-input-group">
+                            <textarea id="unshield-note" placeholder="Paste your secret note here..."></textarea>
+                            <div class="note-actions">
+                                <button class="btn-icon" id="load-unshield-note" title="Load from file">
+                                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                                        <polyline points="17,8 12,3 7,8"/>
+                                        <line x1="12" y1="3" x2="12" y2="15"/>
+                                    </svg>
+                                </button>
+                                <input type="file" id="unshield-note-file" accept=".json,.txt" class="hidden">
+                            </div>
+                        </div>
+                        <div id="unshield-note-info" class="note-info hidden">
+                            <div class="info-row"><span>Chain:</span><span id="unshield-note-chain">--</span></div>
+                            <div class="info-row"><span>Amount:</span><span id="unshield-note-amount">--</span></div>
+                            <div class="info-row"><span>Status:</span><span id="unshield-note-status">--</span></div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Withdrawal Chain</label>
+                        <div class="chain-selector" id="unshield-chain-selector">
+                            <!-- Populated by JS -->
+                        </div>
+                        <small class="pool-info">Pool liquidity: <span id="unshield-pool-liquidity">--</span></small>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Recipient Address</label>
+                        <div class="address-input-group">
+                            <input type="text" id="unshield-recipient" placeholder="0x...">
+                            <button class="btn-small" id="use-my-address-unshield">Use My Address</button>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <label>Amount</label>
+                        <input type="number" id="unshield-amount" placeholder="0.00" min="0" step="0.01">
+                    </div>
+
+                    <div class="fee-summary">
+                        <div class="fee-row">
+                            <span>Withdrawal Fee (0.1%)</span>
+                            <span id="unshield-fee">0.00</span>
+                        </div>
+                        <div class="fee-row total">
+                            <span>You'll Receive</span>
+                            <span id="unshield-receive">0.00</span>
+                        </div>
+                    </div>
+
+                    <button id="unshield-btn" class="btn btn-primary btn-lg btn-full" disabled>
+                        Unshield Tokens
+                    </button>
+                </div>
+            </section>
+
+            <!-- Notes Tab -->
+            <section id="notes-tab" class="tab-content">
+                <div class="card">
+                    <div class="card-header">
+                        <h2>Your Notes</h2>
+                        <p>Manage your private notes securely</p>
+                    </div>
+
+                    <div class="notes-actions">
+                        <button class="btn btn-secondary" id="import-note-btn">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                                <polyline points="17,8 12,3 7,8"/>
+                                <line x1="12" y1="3" x2="12" y2="15"/>
+                            </svg>
+                            Import Note
+                        </button>
+                        <button class="btn btn-secondary" id="export-all-btn">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                                <polyline points="7,10 12,15 17,10"/>
+                                <line x1="12" y1="15" x2="12" y2="3"/>
+                            </svg>
+                            Export All
+                        </button>
+                        <input type="file" id="import-note-file" accept=".json,.txt" class="hidden">
+                    </div>
+
+                    <div id="notes-list" class="notes-list">
+                        <div class="empty-state">
+                            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+                                <polyline points="14,2 14,8 20,8"/>
+                            </svg>
+                            <p>No notes yet</p>
+                            <small>Shield some tokens to create your first note</small>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-links">
+                <a href="#" id="show-pools">Pool Status</a>
+                <a href="https://github.com" target="_blank">GitHub</a>
+                <a href="#" id="show-help">Help</a>
+            </div>
+            <p>Private Bridge v1.0 - Powered by ZK-SNARKs</p>
+        </footer>
+
+        <!-- Modal -->
+        <div id="modal" class="modal hidden">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modal-title">Processing</h3>
+                    <button class="modal-close" id="modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="spinner" id="modal-spinner"></div>
+                    <p id="modal-message">Please wait...</p>
+                    <a id="modal-tx-link" href="#" target="_blank" class="tx-link hidden">View Transaction</a>
+                </div>
+                <div class="modal-footer hidden" id="modal-footer">
+                    <button class="btn btn-primary" id="modal-action-btn">OK</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Note Created Modal -->
+        <div id="note-modal" class="modal hidden">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content modal-lg">
+                <div class="modal-header">
+                    <h3>Your Secret Note</h3>
+                    <button class="modal-close" id="note-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div class="warning-box">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+                            <line x1="12" y1="9" x2="12" y2="13"/>
+                            <line x1="12" y1="17" x2="12.01" y2="17"/>
+                        </svg>
+                        <div>
+                            <strong>Save this note!</strong>
+                            <p>This is the ONLY way to withdraw your funds. If you lose it, your tokens are gone forever.</p>
+                        </div>
+                    </div>
+                    <textarea id="new-note-text" readonly></textarea>
+                </div>
+                <div class="modal-footer">
+                    <button class="btn btn-secondary" id="copy-note-btn">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                            <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+                        </svg>
+                        Copy
+                    </button>
+                    <button class="btn btn-primary" id="download-note-btn">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/>
+                            <polyline points="7,10 12,15 17,10"/>
+                            <line x1="12" y1="15" x2="12" y2="3"/>
+                        </svg>
+                        Download
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pool Status Modal -->
+        <div id="pool-modal" class="modal hidden">
+            <div class="modal-backdrop"></div>
+            <div class="modal-content modal-lg">
+                <div class="modal-header">
+                    <h3>Pool Status</h3>
+                    <button class="modal-close" id="pool-modal-close">&times;</button>
+                </div>
+                <div class="modal-body">
+                    <div id="pool-status-grid" class="pool-grid">
+                        <!-- Populated by JS -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/ethers/6.9.0/ethers.umd.min.js"></script>
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

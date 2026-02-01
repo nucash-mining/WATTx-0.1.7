@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WATTx Privacy Bridge</title>
+    <link rel="stylesheet" href="styles.css">
+    <script src="ethers.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>WATTx Privacy Bridge</h1>
+            <p class="subtitle">Anonymous Cross-Chain USDT Transfers</p>
+            <div id="wallet-section">
+                <button id="connect-btn" class="btn btn-primary">Connect Wallet</button>
+                <div id="wallet-info" class="hidden">
+                    <span id="wallet-address"></span>
+                    <span id="wallet-network"></span>
+                </div>
+            </div>
+        </header>
+
+        <nav class="tabs">
+            <button class="tab active" data-tab="deposit">Deposit</button>
+            <button class="tab" data-tab="withdraw">Withdraw</button>
+            <button class="tab" data-tab="status">Status</button>
+        </nav>
+
+        <!-- Deposit Tab -->
+        <section id="deposit-tab" class="tab-content active">
+            <div class="card">
+                <h2>Shield USDT</h2>
+                <p class="description">Deposit USDT to receive an anonymous withdrawal note</p>
+
+                <div class="form-group">
+                    <label>Source Chain</label>
+                    <select id="deposit-chain">
+                        <option value="polygon">Polygon (MATIC)</option>
+                        <option value="bsc">BNB Smart Chain</option>
+                        <option value="arbitrum">Arbitrum One</option>
+                        <option value="avalanche">Avalanche C-Chain</option>
+                        <option value="optimism">Optimism</option>
+                        <option value="base">Base</option>
+                        <option value="ethereum">Ethereum</option>
+                        <option value="altcoinchain">Altcoinchain</option>
+                        <option value="custom">Custom Contract...</option>
+                    </select>
+                </div>
+
+                <div id="custom-contract-section" class="hidden">
+                    <div class="form-group">
+                        <label>Bridge Contract Address</label>
+                        <input type="text" id="custom-bridge" placeholder="0x...">
+                    </div>
+                    <div class="form-group">
+                        <label>USDT Contract Address</label>
+                        <input type="text" id="custom-usdt" placeholder="0x...">
+                    </div>
+                    <div class="form-group">
+                        <label>USDT Decimals</label>
+                        <input type="number" id="custom-decimals" value="6" min="0" max="18">
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Amount (USDT)</label>
+                    <div class="amount-presets">
+                        <button class="preset" data-amount="100">100</button>
+                        <button class="preset" data-amount="1000">1K</button>
+                        <button class="preset" data-amount="10000">10K</button>
+                        <button class="preset" data-amount="100000">100K</button>
+                        <button class="preset" data-amount="1000000">1M</button>
+                    </div>
+                    <input type="number" id="deposit-amount" placeholder="Enter amount" min="1">
+                </div>
+
+                <div class="fee-breakdown">
+                    <div class="fee-row">
+                        <span>Shielding Fee (0.1%)</span>
+                        <span id="shield-fee">0.00 USDT</span>
+                    </div>
+                    <div class="fee-row">
+                        <span>Bridge Fee (0.05%)</span>
+                        <span id="bridge-fee">0.00 USDT</span>
+                    </div>
+                    <div class="fee-row total">
+                        <span>You Receive</span>
+                        <span id="receive-amount">0.00 USDT</span>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>USDT Balance</label>
+                    <span id="usdt-balance">--</span>
+                </div>
+
+                <button id="approve-btn" class="btn btn-secondary">Approve USDT</button>
+                <button id="deposit-btn" class="btn btn-primary" disabled>Deposit</button>
+
+                <div id="note-output" class="hidden">
+                    <h3>Your Secret Note</h3>
+                    <p class="warning">Save this note! It's required to withdraw your funds anonymously.</p>
+                    <textarea id="secret-note" readonly></textarea>
+                    <button id="copy-note" class="btn btn-secondary">Copy Note</button>
+                    <button id="download-note" class="btn btn-secondary">Download</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Withdraw Tab -->
+        <section id="withdraw-tab" class="tab-content">
+            <div class="card">
+                <h2>Unshield USDT</h2>
+                <p class="description">Withdraw to any supported chain using your secret note</p>
+
+                <div class="form-group">
+                    <label>Secret Note</label>
+                    <textarea id="withdraw-note" placeholder="Paste your secret note here..."></textarea>
+                    <input type="file" id="note-file" accept=".txt,.json" class="hidden">
+                    <button id="load-note-btn" class="btn btn-small">Load from File</button>
+                </div>
+
+                <div id="note-details" class="hidden">
+                    <div class="detail-row">
+                        <span>Deposited On:</span>
+                        <span id="note-chain">--</span>
+                    </div>
+                    <div class="detail-row">
+                        <span>Amount:</span>
+                        <span id="note-amount">--</span>
+                    </div>
+                    <div class="detail-row">
+                        <span>Status:</span>
+                        <span id="note-status">--</span>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>Destination Chain</label>
+                    <select id="withdraw-chain">
+                        <option value="altcoinchain">Altcoinchain (ALT)</option>
+                        <option value="polygon">Polygon (MATIC)</option>
+                        <option value="bsc">BNB Smart Chain</option>
+                        <option value="arbitrum">Arbitrum One</option>
+                        <option value="avalanche">Avalanche C-Chain</option>
+                        <option value="optimism">Optimism</option>
+                        <option value="base">Base</option>
+                        <option value="ethereum">Ethereum</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label>Recipient Address</label>
+                    <input type="text" id="recipient-address" placeholder="0x...">
+                    <button id="use-connected" class="btn btn-small">Use Connected Wallet</button>
+                </div>
+
+                <div class="form-group">
+                    <label>Withdrawal Amount (USDT)</label>
+                    <input type="number" id="withdraw-amount-input" placeholder="Enter amount" min="0.01" step="0.01">
+                    <small id="pool-liquidity-info" style="color: var(--text-muted);">Pool liquidity: Loading...</small>
+                </div>
+
+                <div class="fee-breakdown">
+                    <div class="fee-row">
+                        <span>Withdrawal Amount</span>
+                        <span id="withdraw-amount">0.00 USDT</span>
+                    </div>
+                    <div class="fee-row">
+                        <span>Withdrawal Fee (0.1%)</span>
+                        <span id="relayer-fee">0.00 USDT</span>
+                    </div>
+                    <div class="fee-row total">
+                        <span>You Receive</span>
+                        <span id="final-receive">0.00 USDT</span>
+                    </div>
+                </div>
+
+                <button id="withdraw-btn" class="btn btn-primary" disabled>Withdraw Anonymously</button>
+            </div>
+        </section>
+
+        <!-- Status Tab -->
+        <section id="status-tab" class="tab-content">
+            <div class="card">
+                <h2>Bridge Status</h2>
+
+                <div class="status-grid">
+                    <div class="status-card">
+                        <h3>Polygon</h3>
+                        <div class="status-indicator" id="status-polygon"></div>
+                        <p class="pool-balance" id="pool-polygon">--</p>
+                    </div>
+                    <div class="status-card">
+                        <h3>Altcoinchain</h3>
+                        <div class="status-indicator" id="status-altcoinchain"></div>
+                        <p class="pool-balance" id="pool-altcoinchain">--</p>
+                    </div>
+                    <div class="status-card">
+                        <h3>BSC</h3>
+                        <div class="status-indicator" id="status-bsc"></div>
+                        <p class="pool-balance" id="pool-bsc">--</p>
+                    </div>
+                    <div class="status-card">
+                        <h3>Arbitrum</h3>
+                        <div class="status-indicator" id="status-arbitrum"></div>
+                        <p class="pool-balance" id="pool-arbitrum">--</p>
+                    </div>
+                </div>
+
+                <h3>Recent Transactions</h3>
+                <div id="tx-history">
+                    <p class="empty-state">No recent transactions</p>
+                </div>
+
+                <h3>Root Sync Status</h3>
+                <div id="root-sync">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Chain</th>
+                                <th>Local Root</th>
+                                <th>Synced Roots</th>
+                            </tr>
+                        </thead>
+                        <tbody id="root-sync-body">
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- Transaction Modal -->
+        <div id="tx-modal" class="modal hidden">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3 id="modal-title">Processing...</h3>
+                </div>
+                <div class="modal-body">
+                    <div class="spinner"></div>
+                    <p id="modal-status">Waiting for confirmation...</p>
+                    <a id="modal-tx-link" href="#" target="_blank" class="hidden">View on Explorer</a>
+                </div>
+                <div class="modal-footer">
+                    <button id="modal-close" class="btn btn-secondary hidden">Close</button>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>WATTx Privacy Bridge v1.0 | Powered by ZK-SNARKs</p>
+            <p class="disclaimer">Use at your own risk. Always verify contract addresses.</p>
+        </footer>
+    </div>
+
+    <script src="config.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

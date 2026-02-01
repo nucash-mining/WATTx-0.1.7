@@ -1,0 +1,42 @@
+[package]
+name = "wattx-fcmp"
+version = "0.1.0"
+edition = "2021"
+description = "FCMP++ (Full-Chain Membership Proofs) FFI library for WATTx"
+license = "MIT"
+authors = ["WATTx Core Developers"]
+
+[lib]
+name = "wattx_fcmp"
+crate-type = ["staticlib", "cdylib"]
+
+[dependencies]
+# Core dependencies from FCMP++
+rand_core = { version = "0.6", features = ["getrandom"] }
+zeroize = { version = "1.5", features = ["zeroize_derive"] }
+
+# Crypto dependencies
+blake2 = "0.10"
+subtle = "2"
+
+# Group/field traits
+ff = { version = "0.13", features = ["bits"] }
+group = "0.13"
+
+# Ed25519 support
+curve25519-dalek = { version = "4", features = ["digest", "rand_core"] }
+
+# For FFI
+libc = "0.2"
+
+# Optional: full FCMP++ library (when available)
+# full-chain-membership-proofs = { path = "../../../../fcmp-research/fcmp-plus-plus/crypto/fcmps" }
+# helioselene = { path = "../../../../fcmp-research/fcmp-plus-plus/crypto/helioselene" }
+
+[build-dependencies]
+cbindgen = "0.26"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,106 @@
+--- a/src/stratum/stratum_server.cpp
++++ b/src/stratum/stratum_server.cpp
+@@ -696,6 +696,7 @@ void StratumServer::SendJob(int client_id, const StratumJob& job) {
+
+ bool StratumServer::ValidateAndSubmitShare(int client_id, const std::string& job_id,
+                                             const std::string& nonce_hex, const std::string& result_hex) {
++    LogPrintf("Stratum: ValidateAndSubmitShare called - job_id=%s nonce=%s\n", job_id, nonce_hex);
+     StratumJob job;
+     {
+         std::lock_guard<std::mutex> lock(m_jobs_mutex);
+@@ -717,6 +718,13 @@ bool StratumServer::ValidateAndSubmitShare(int client_id, const std::string& job
+     try {
+         // Parse nonce (XMRig sends 4 bytes in little-endian hex)
+         uint32_t nonce = 0;
++        std::vector<unsigned char> nonce_bytes;
++        if (nonce_hex.length() >= 8) {
++            nonce_bytes = ParseHex(nonce_hex);
++        }
++        if (nonce_bytes.size() < 4) {
++            nonce_bytes.resize(4, 0);
++        }
+         if (nonce_hex.length() == 8) {
+             // 4 bytes hex = 8 chars, little endian
+             auto nonce_bytes = ParseHex(nonce_hex);
+@@ -729,11 +737,6 @@ bool StratumServer::ValidateAndSubmitShare(int client_id, const std::string& job
+         LogPrintf("Stratum: Validating share - job_id=%s nonce=0x%08x result=%s\n",
+                   job_id, nonce, result_hex.substr(0, 16));
+
+-        // Get block from template for validation
+-        CBlock block = job.block_template->getBlock();
+-        block.nNonce = nonce;
+-
+         // Ensure RandomX is initialized with the genesis block hash
+         const CChainParams& chainParams = Params();
+         uint256 genesisHash = chainParams.GenesisBlock().GetHash();
+@@ -746,9 +749,19 @@ bool StratumServer::ValidateAndSubmitShare(int client_id, const std::string& job
+             }
+         }
+
+-        // Compute RandomX hash of the full serialized header
+-        auto headerData = node::RandomXMiner::SerializeBlockHeader(block);
++        // Reconstruct the blob with submitted nonce inserted at bytes 39-42
++        // This is the same data that XMRig hashed
++        auto blobBytes = ParseHex(job.blob);
++        if (blobBytes.size() < 43) {
++            LogPrintf("Stratum: Invalid blob size %d\n", blobBytes.size());
++            return false;
++        }
++        // Insert nonce at bytes 39-42 (little-endian)
++        blobBytes[39] = nonce_bytes[0];
++        blobBytes[40] = nonce_bytes[1];
++        blobBytes[41] = nonce_bytes[2];
++        blobBytes[42] = nonce_bytes[3];
+
++        // Hash the blob - this is what XMRig computed
+         uint256 hash;
+-        miner.CalculateHash(headerData.data(), headerData.size(), hash.data());
++        miner.CalculateHash(blobBytes.data(), blobBytes.size(), hash.data());
+
+         // Check against target
+         arith_uint256 target;
+-        target.SetCompact(block.nBits);
++        target.SetCompact(job.bits);
+
+         arith_uint256 hashArith = UintToArith256(hash);
+
+@@ -765,18 +778,35 @@ bool StratumServer::ValidateAndSubmitShare(int client_id, const std::string& job
+             LogPrintf("Stratum: Share above target (hash > target)\n");
+             return false;
+         }
+
+-        // Valid block! Submit it via the BlockTemplate interface
+-        LogPrintf("Stratum: BLOCK FOUND! hash=%s nonce=%u\n", hash.GetHex(), nonce);
++        // Share is valid! Check if it also meets block target
++        LogPrintf("Stratum: Valid share found! hash=%s nonce=%u\n", hash.GetHex(), nonce);
++
++        // For block submission, we need to compute the actual block header hash
++        CBlock block = job.block_template->getBlock();
++        block.nNonce = nonce;
++
++        // Compute hash of actual block header
++        auto headerData = node::RandomXMiner::SerializeBlockHeader(block);
++        uint256 blockHash;
++        miner.CalculateHash(headerData.data(), headerData.size(), blockHash.data());
++
++        arith_uint256 blockHashArith = UintToArith256(blockHash);
++        if (blockHashArith > target) {
++            // Share is valid but not a block - this is normal for pool mining
++            LogPrintf("Stratum: Share accepted (not a block)\n");
++            return true;  // Accept the share
++        }
+
++        // BLOCK FOUND!
++        LogPrintf("Stratum: BLOCK FOUND! hash=%s nonce=%u\n", blockHash.GetHex(), nonce);
++
+         // Submit using submitSolution - pass version, timestamp, nonce, and coinbase
+         CTransactionRef coinbase = job.block_template->getCoinbaseTx();
+         bool accepted = job.block_template->submitSolution(block.nVersion, block.nTime, nonce, coinbase);
+
+         if (accepted) {
+             m_blocks_found++;
+             LogPrintf("Stratum: Block accepted!\n");
+-
+             // Create new job for next block
+             NotifyNewBlock();
+             return true;

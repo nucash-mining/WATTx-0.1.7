@@ -1,0 +1,11 @@
+{
+  "network": "sepolia",
+  "chainId": 11155111,
+  "contracts": {
+    "MockUSDT": "0x44dB5E90cE123f9caf2A8078C233845ADcBBF2cB",
+    "Groth16Verifier": "0x6D9A459e72Ac975bcF7150207ac61803B5A982E6",
+    "PrivacyPoolBridge": "0xb0E9244981998a52924aF8f203de6Bc6cAD36a7E"
+  },
+  "deployer": "0xdE21D9E8099Be58D39a16ADB80d2b3A46726AEA5",
+  "timestamp": 1769543173909
+}

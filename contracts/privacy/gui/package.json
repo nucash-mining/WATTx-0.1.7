@@ -1,0 +1,19 @@
+{
+  "name": "wattx-privacy-bridge-gui",
+  "version": "1.0.0",
+  "description": "Web GUI for WATTx Privacy Bridge - Anonymous Cross-Chain USDT Transfers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "privacy",
+    "bridge",
+    "usdt",
+    "cross-chain",
+    "zk-snarks"
+  ],
+  "author": "WATTx",
+  "license": "MIT"
+}

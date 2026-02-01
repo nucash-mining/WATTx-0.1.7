@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "sourceChain": {
+    "name": "sepolia",
+    "chainId": 11155111,
+    "bridge": "0xb0E9244981998a52924aF8f203de6Bc6cAD36a7E",
+    "token": "0x44dB5E90cE123f9caf2A8078C233845ADcBBF2cB"
+  },
+  "destChain": {
+    "name": "altcoinchain",
+    "chainId": 2330,
+    "bridge": "0x92764bADc530D9929726F86f9Af1fFE285477da4",
+    "token": "0xA63C722Fc164e98cc47F05397fDab1aBb7A8f7CB"
+  },
+  "deposit": {
+    "commitment": "0x1e5c3aae687f6f5dc15601e8f5ac96d8267b17ed28294fb9257c83056c525083",
+    "nullifier": "0x00b96f4b77ee25e1b074fdb1a8060a08d58ce88eea6bea17732d7f6c5d5a232b",
+    "secret": "0x00b1e35df64ef720450b2446bcb79a03ead59025c67dfb21c500cb955e073753",
+    "nullifierHash": "0xf6ca2ee4d408b1a33378e21006be1fc108fb420d2afb31a932623ea5a248b7e6",
+    "amount": "1000000000000",
+    "leafIndex": "0",
+    "merkleRoot": "0x74ee2e82f67508b7e629a14a6fda6fb257ea716c0d2822dafa5ab9041f063cff",
+    "txHash": "0x677bd575105c27221f5c73b07af02acac4413361a1d037aa62fcd233b3b010fd",
+    "timestamp": 1769545476865
+  }
+}
