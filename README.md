@@ -31,7 +31,7 @@ Mine using any of 7 supported algorithms:
 ### Hybrid Consensus
 - **PoW Mining** - Multi-algorithm support via X25X
 - **PoS Staking** - Dynamic stake maturity that halves with block reward halvings
-- **AuxPoW Merged Mining** - Mine WATTx while mining Monero
+- **AuxPoW Merged Mining** - Mine WATTx while mining Monero, BTC, LTC, KAS, ALT, ETC (any coin with suppoprted algorithm)
 
 ### Cross-Chain Bridge
 - LayerZero-based OFT token bridge
