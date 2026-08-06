@@ -1347,6 +1347,146 @@ pub extern "C" fn fcmp_error_string(code: i32) -> *const i8 {
 // Tests
 // ============================================================================
 
+// ============================================================================
+// Curve-Tree Layer Hashing (Selene / Helios cycle)
+// ============================================================================
+//
+// An FCMP++ curve tree alternates between two curves whose scalar and base
+// fields interlock (a 2-cycle): a point on one curve has coordinates that are
+// scalars on the other, so a statement about one layer is provable in a circuit
+// over the next. That is the whole reason the construction works.
+//
+// Layer shape, matching the reference implementation:
+//
+//   leaves   : ed25519 outputs -> 6 Selene scalars each (Ox,Oy,Ix,Iy,Cx,Cy)
+//                              -> hash with Selene generators -> SELENE point
+//   next     : Selene points   -> x coordinate as a Helios scalar
+//                              -> hash with Helios generators -> HELIOS point
+//   next     : Helios points   -> x coordinate as a Selene scalar
+//                              -> hash with Selene generators -> SELENE point
+//   ... alternating to the root.
+//
+// Note internal layers use ONLY the x coordinate of each child, while the leaf
+// layer uses both coordinates of all three points. Getting that wrong produces a
+// tree that hashes cleanly and matches nothing.
+//
+// These exist because the C++ curve tree hashed ed25519 -> ed25519 by reducing
+// compressed point bytes modulo the group order. That is not a curve-tree hash:
+// it is not injective, and it cannot be opened inside the Generalized
+// Bulletproofs circuit, so membership proofs over it prove nothing.
+
+/// Hash one layer of Selene points into their Helios parent.
+///
+/// `children` is `num_children` × 32 bytes, each a compressed Selene point.
+/// `root_out` receives a 32-byte compressed Helios point.
+#[no_mangle]
+pub unsafe extern "C" fn fcmp_hash_helios_layer(
+    root_out: *mut u8,
+    children: *const u8,
+    num_children: usize,
+) -> i32 {
+    use monero_fcmp_plus_plus::{HELIOS_GENERATORS, HELIOS_HASH_INIT};
+    use ciphersuite::{group::{ff::Field, GroupEncoding}, Ciphersuite, Helios, Selene};
+    use ec_divisors::DivisorCurve;
+    use monero_fcmp_plus_plus::fcmps::{self, tree::hash_grow};
+
+    if root_out.is_null() || children.is_null() { return FCMP_ERROR_INVALID_PARAM; }
+    if num_children == 0 || num_children > fcmps::LAYER_TWO_LEN { return FCMP_ERROR_INVALID_PARAM; }
+
+    let bytes = slice::from_raw_parts(children, num_children * 32);
+    let mut scalars: Vec<<Helios as Ciphersuite>::F> = Vec::with_capacity(num_children);
+    for i in 0..num_children {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes[i * 32..(i + 1) * 32]);
+        let pt: <Selene as Ciphersuite>::G =
+            match Option::from(<Selene as Ciphersuite>::G::from_bytes(&arr)) {
+                Some(p) => p,
+                None => return FCMP_ERROR_INVALID_POINT,
+            };
+        // Only the x coordinate, matching the reference.
+        let (x, _y) = match <Selene as Ciphersuite>::G::to_xy(pt) {
+            Some(c) => c,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+        scalars.push(x);
+    }
+
+    let root = match hash_grow(
+        HELIOS_GENERATORS(),
+        HELIOS_HASH_INIT(),
+        0,
+        <Helios as Ciphersuite>::F::ZERO,
+        &scalars,
+    ) {
+        Some(r) => r,
+        None => return FCMP_ERROR_INTERNAL,
+    };
+
+    let out = root.to_bytes();
+    if out.as_ref().len() != 32 { return FCMP_ERROR_INTERNAL; }
+    ptr::copy_nonoverlapping(out.as_ref().as_ptr(), root_out, 32);
+    FCMP_SUCCESS
+}
+
+/// Hash one layer of Helios points into their Selene parent.
+///
+/// `children` is `num_children` × 32 bytes, each a compressed Helios point.
+/// `root_out` receives a 32-byte compressed Selene point.
+#[no_mangle]
+pub unsafe extern "C" fn fcmp_hash_selene_layer(
+    root_out: *mut u8,
+    children: *const u8,
+    num_children: usize,
+) -> i32 {
+    use monero_fcmp_plus_plus::{SELENE_GENERATORS, SELENE_HASH_INIT};
+    use ciphersuite::{group::{ff::Field, GroupEncoding}, Ciphersuite, Helios, Selene};
+    use ec_divisors::DivisorCurve;
+    use monero_fcmp_plus_plus::fcmps::{self, tree::hash_grow};
+
+    if root_out.is_null() || children.is_null() { return FCMP_ERROR_INVALID_PARAM; }
+    if num_children == 0 || num_children > fcmps::LAYER_ONE_LEN { return FCMP_ERROR_INVALID_PARAM; }
+
+    let bytes = slice::from_raw_parts(children, num_children * 32);
+    let mut scalars: Vec<<Selene as Ciphersuite>::F> = Vec::with_capacity(num_children);
+    for i in 0..num_children {
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes[i * 32..(i + 1) * 32]);
+        let pt: <Helios as Ciphersuite>::G =
+            match Option::from(<Helios as Ciphersuite>::G::from_bytes(&arr)) {
+                Some(p) => p,
+                None => return FCMP_ERROR_INVALID_POINT,
+            };
+        let (x, _y) = match <Helios as Ciphersuite>::G::to_xy(pt) {
+            Some(c) => c,
+            None => return FCMP_ERROR_INVALID_POINT,
+        };
+        scalars.push(x);
+    }
+
+    let root = match hash_grow(
+        SELENE_GENERATORS(),
+        SELENE_HASH_INIT(),
+        0,
+        <Selene as Ciphersuite>::F::ZERO,
+        &scalars,
+    ) {
+        Some(r) => r,
+        None => return FCMP_ERROR_INTERNAL,
+    };
+
+    let out = root.to_bytes();
+    if out.as_ref().len() != 32 { return FCMP_ERROR_INTERNAL; }
+    ptr::copy_nonoverlapping(out.as_ref().as_ptr(), root_out, 32);
+    FCMP_SUCCESS
+}
+
+/// Branch widths, so the C++ tree does not hard-code constants that live here.
+#[no_mangle]
+pub unsafe extern "C" fn fcmp_layer_one_len() -> usize { monero_fcmp_plus_plus::fcmps::LAYER_ONE_LEN }
+
+#[no_mangle]
+pub unsafe extern "C" fn fcmp_layer_two_len() -> usize { monero_fcmp_plus_plus::fcmps::LAYER_TWO_LEN }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1467,6 +1607,88 @@ mod tests {
             let mut commitment2 = [0u8; POINT_SIZE];
             assert_eq!(fcmp_pedersen_commit(commitment2.as_mut_ptr(), value.as_ptr(), blinding.as_ptr()), FCMP_SUCCESS);
             assert_eq!(commitment, commitment2);
+        }
+    }
+
+    /// Layer hashing must agree with the reference implementation BYTE FOR BYTE.
+    ///
+    /// A curve tree whose hash differs from the prover's is worse than useless:
+    /// it produces roots that look fine and membership proofs that verify against
+    /// nothing. This asserts our FFI reproduces exactly what the fcmp++ crate's
+    /// own hash_grow produces for the same children.
+    #[test]
+    fn test_layer_hashing_matches_reference() {
+        use monero_fcmp_plus_plus::{
+            SELENE_GENERATORS, SELENE_HASH_INIT, HELIOS_GENERATORS, HELIOS_HASH_INIT,
+            fcmps::tree::hash_grow,
+        };
+        use ciphersuite::{group::{ff::Field, Group, GroupEncoding}, Ciphersuite, Helios, Selene};
+        use ec_divisors::DivisorCurve;
+        use rand_core::OsRng;
+
+        unsafe {
+            assert_eq!(fcmp_init(), FCMP_SUCCESS);
+
+            // --- Selene children -> Helios parent ---
+            let n = 5usize;
+            let sel_pts: Vec<<Selene as Ciphersuite>::G> =
+                (0..n).map(|_| <Selene as Ciphersuite>::G::random(&mut OsRng)).collect();
+
+            let mut flat = Vec::with_capacity(n * 32);
+            for p in &sel_pts { flat.extend_from_slice(p.to_bytes().as_ref()); }
+
+            let mut got = [0u8; 32];
+            assert_eq!(fcmp_hash_helios_layer(got.as_mut_ptr(), flat.as_ptr(), n), FCMP_SUCCESS);
+
+            let xs: Vec<<Helios as Ciphersuite>::F> = sel_pts.iter()
+                .map(|p| <Selene as Ciphersuite>::G::to_xy(*p).unwrap().0).collect();
+            let want = hash_grow(HELIOS_GENERATORS(), HELIOS_HASH_INIT(), 0,
+                                 <Helios as Ciphersuite>::F::ZERO, &xs).unwrap();
+            assert_eq!(&got[..], want.to_bytes().as_ref(),
+                       "helios layer hash does not match the reference");
+
+            // --- Helios children -> Selene parent ---
+            let m = 7usize;
+            let hel_pts: Vec<<Helios as Ciphersuite>::G> =
+                (0..m).map(|_| <Helios as Ciphersuite>::G::random(&mut OsRng)).collect();
+
+            let mut flat2 = Vec::with_capacity(m * 32);
+            for p in &hel_pts { flat2.extend_from_slice(p.to_bytes().as_ref()); }
+
+            let mut got2 = [0u8; 32];
+            assert_eq!(fcmp_hash_selene_layer(got2.as_mut_ptr(), flat2.as_ptr(), m), FCMP_SUCCESS);
+
+            let xs2: Vec<<Selene as Ciphersuite>::F> = hel_pts.iter()
+                .map(|p| <Helios as Ciphersuite>::G::to_xy(*p).unwrap().0).collect();
+            let want2 = hash_grow(SELENE_GENERATORS(), SELENE_HASH_INIT(), 0,
+                                  <Selene as Ciphersuite>::F::ZERO, &xs2).unwrap();
+            assert_eq!(&got2[..], want2.to_bytes().as_ref(),
+                       "selene layer hash does not match the reference");
+
+            // Determinism: same children, same root.
+            let mut again = [0u8; 32];
+            assert_eq!(fcmp_hash_helios_layer(again.as_mut_ptr(), flat.as_ptr(), n), FCMP_SUCCESS);
+            assert_eq!(got, again);
+
+            // Order matters -- a tree that ignored child order would let anyone
+            // permute a branch and keep the same root.
+            let mut swapped = flat.clone();
+            for i in 0..32 { swapped.swap(i, 32 + i); }
+            let mut got3 = [0u8; 32];
+            assert_eq!(fcmp_hash_helios_layer(got3.as_mut_ptr(), swapped.as_ptr(), n), FCMP_SUCCESS);
+            assert_ne!(got, got3, "layer hash is insensitive to child order");
+
+            // Width limits are enforced rather than silently truncating.
+            assert_eq!(fcmp_hash_helios_layer(got.as_mut_ptr(), flat.as_ptr(), 0),
+                       FCMP_ERROR_INVALID_PARAM);
+            assert_eq!(fcmp_hash_selene_layer(got.as_mut_ptr(), flat2.as_ptr(),
+                                              fcmp_layer_one_len() + 1),
+                       FCMP_ERROR_INVALID_PARAM);
+
+            assert_eq!(fcmp_layer_one_len(), 38);
+            assert_eq!(fcmp_layer_two_len(), 18);
+
+            fcmp_cleanup();
         }
     }
 

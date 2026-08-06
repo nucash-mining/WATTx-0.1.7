@@ -348,6 +348,46 @@ const char* fcmp_version(void);
  */
 const char* fcmp_error_string(int32_t code);
 
+// ============================================================================
+// Curve-Tree Layer Hashing (Selene / Helios cycle)
+// ============================================================================
+//
+// An FCMP++ curve tree alternates two curves whose scalar and base fields
+// interlock, so a statement about one layer is provable in a circuit over the
+// next. Layers hash as:
+//
+//   leaves        : ed25519 outputs -> 6 Selene scalars each -> SELENE point
+//   Selene layer  : Selene points -> x coord as Helios scalar -> HELIOS point
+//   Helios layer  : Helios points -> x coord as Selene scalar -> SELENE point
+//
+// Internal layers use ONLY each child's x coordinate; the leaf layer uses both
+// coordinates of all three points (O, I, C). Both functions reproduce the
+// reference implementation's hash_grow byte for byte.
+
+/**
+ * Hash a layer of Selene points into their Helios parent.
+ *
+ * root_out     - 32-byte output: compressed Helios point
+ * children     - num_children * 32 bytes, each a compressed Selene point
+ * num_children - 1 .. fcmp_layer_two_len()
+ */
+int32_t fcmp_hash_helios_layer(uint8_t* root_out, const uint8_t* children, size_t num_children);
+
+/**
+ * Hash a layer of Helios points into their Selene parent.
+ *
+ * root_out     - 32-byte output: compressed Selene point
+ * children     - num_children * 32 bytes, each a compressed Helios point
+ * num_children - 1 .. fcmp_layer_one_len()
+ */
+int32_t fcmp_hash_selene_layer(uint8_t* root_out, const uint8_t* children, size_t num_children);
+
+/** Branch width of a Selene (C1) layer. */
+size_t fcmp_layer_one_len(void);
+
+/** Branch width of a Helios (C2) layer. */
+size_t fcmp_layer_two_len(void);
+
 #ifdef __cplusplus
 }
 #endif
