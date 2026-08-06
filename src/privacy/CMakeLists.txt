@@ -39,6 +39,7 @@ add_library(wattx_privacy STATIC
     ed25519/pedersen.cpp
     # Curve tree module for FCMP
     curvetree/curve_tree.cpp
+    curvetree/curve_tree_hash.cpp
     curvetree/tree_db.cpp
 )
 
@@ -100,6 +101,7 @@ target_compile_options(test_ed25519 PRIVATE ${SODIUM_CFLAGS_OTHER})
 add_executable(test_curvetree
     curvetree/curvetree_tests.cpp
     curvetree/curve_tree.cpp
+    curvetree/curve_tree_hash.cpp
     curvetree/tree_db.cpp
     ed25519/ed25519_ops.cpp
     ed25519/pedersen.cpp
