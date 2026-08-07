@@ -282,7 +282,7 @@ static RPCHelpMan listsuperstakervaluesforaddress()
                     "\nList super staker configuration values for address." +
                     HELP_REQUIRING_PASSPHRASE,
                     {
-                        {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The super staker Qtum address."},
+                        {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The super staker WATTx address."},
                     },
                     RPCResult{
                         RPCResult::Type::OBJ, "", "",
@@ -351,7 +351,7 @@ static RPCHelpMan removesuperstakervaluesforaddress()
                     "\nRemove super staker configuration values for address." +
                     HELP_REQUIRING_PASSPHRASE,
                     {
-                        {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The super staker Qtum address."},
+                        {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The super staker WATTx address."},
                     },
                     RPCResult{RPCResult::Type::NONE, "", ""},
                     RPCExamples{

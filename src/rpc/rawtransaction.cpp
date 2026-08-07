@@ -199,7 +199,7 @@ static RPCHelpMan gethexaddress()
 
     CTxDestination dest = DecodeDestination(request.params[0].get_str());
     if (!IsValidDestination(dest)) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Qtum address");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid WATTx address");
     }
 
     if(!std::holds_alternative<PKHash>(dest))
@@ -248,7 +248,7 @@ static std::vector<RPCResult> DecodeExpanded(bool isExpanded, bool isVin)
             return {
                 {RPCResult::Type::STR_AMOUNT, "value", /*optional=*/true, "The value in " + CURRENCY_UNIT + " (only if address index is enabled)"},
                 {RPCResult::Type::NUM, "valueSat", /*optional=*/true, "The value in Sat (only if address index is enabled)"},
-                {RPCResult::Type::STR, "address", /*optional=*/true, "The Qtum address (only if address index is enabled)"},
+                {RPCResult::Type::STR, "address", /*optional=*/true, "The WATTx address (only if address index is enabled)"},
             };
         }
         else {
@@ -704,7 +704,7 @@ public:
         if (Contract.exists("senderAddress")){
             senderAddress = DecodeDestination(Contract["senderAddress"].get_str());
             if (!IsValidDestination(senderAddress))
-                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Qtum address to send from");
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid WATTx address to send from");
             if (!IsValidContractSenderAddress(senderAddress))
                 throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid contract sender address. Only P2PK and P2PKH allowed");
             else
@@ -871,7 +871,7 @@ static RPCHelpMan decodescript()
                 {RPCResult::Type::STR, "asm", "Disassembly of the script"},
                 {RPCResult::Type::STR, "desc", "Inferred descriptor for the script"},
                 {RPCResult::Type::STR, "type", "The output type (e.g. " + GetAllOutputTypes() + ")"},
-                {RPCResult::Type::STR, "address", /*optional=*/true, "The Qtum address (only if a well-defined address exists)"},
+                {RPCResult::Type::STR, "address", /*optional=*/true, "The WATTx address (only if a well-defined address exists)"},
                 {RPCResult::Type::STR, "p2sh", /*optional=*/true,
                  "address of P2SH script wrapping this redeem script (not returned for types that should not be wrapped)"},
                 {RPCResult::Type::OBJ, "segwit", /*optional=*/true,
@@ -880,7 +880,7 @@ static RPCHelpMan decodescript()
                      {RPCResult::Type::STR, "asm", "Disassembly of the output script"},
                      {RPCResult::Type::STR_HEX, "hex", "The raw output script bytes, hex-encoded"},
                      {RPCResult::Type::STR, "type", "The type of the output script (e.g. witness_v0_keyhash or witness_v0_scripthash)"},
-                     {RPCResult::Type::STR, "address", /*optional=*/true, "The Qtum address (only if a well-defined address exists)"},
+                     {RPCResult::Type::STR, "address", /*optional=*/true, "The WATTx address (only if a well-defined address exists)"},
                      {RPCResult::Type::STR, "desc", "Inferred descriptor for the script"},
                      {RPCResult::Type::STR, "p2sh-segwit", "address of the P2SH script wrapping this witness redeem script"},
                  }},
@@ -1286,7 +1286,7 @@ const RPCResult decodepsbt_inputs{
                     {RPCResult::Type::STR, "desc", "Inferred descriptor for the output"},
                     {RPCResult::Type::STR_HEX, "hex", "The raw output script bytes, hex-encoded"},
                     {RPCResult::Type::STR, "type", "The type, eg 'pubkeyhash'"},
-                    {RPCResult::Type::STR, "address", /*optional=*/true, "The Qtum address (only if a well-defined address exists)"},
+                    {RPCResult::Type::STR, "address", /*optional=*/true, "The WATTx address (only if a well-defined address exists)"},
                 }},
             }},
             {RPCResult::Type::OBJ_DYN, "partial_signatures", /*optional=*/true, "",
@@ -1466,7 +1466,7 @@ static RPCHelpMan decodepsbt()
 {
     return RPCHelpMan{
         "decodepsbt",
-        "Return a JSON object representing the serialized, base64-encoded partially signed Qtum transaction.",
+        "Return a JSON object representing the serialized, base64-encoded partially signed WATTx transaction.",
                 {
                     {"psbt", RPCArg::Type::STR, RPCArg::Optional::NO, "The PSBT base64 string"},
                 },
@@ -1906,7 +1906,7 @@ static RPCHelpMan decodepsbt()
 static RPCHelpMan combinepsbt()
 {
     return RPCHelpMan{"combinepsbt",
-                "\nCombine multiple partially signed Qtum transactions into one transaction.\n"
+                "\nCombine multiple partially signed WATTx transactions into one transaction.\n"
                 "Implements the Combiner role.\n",
                 {
                     {"txs", RPCArg::Type::ARR, RPCArg::Optional::NO, "The base64 strings of partially signed transactions",

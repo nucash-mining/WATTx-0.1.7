@@ -385,7 +385,7 @@ RPCHelpMan sendtoaddress()
     if (!request.params[11].isNull()){
     senderAddress = DecodeDestination(request.params[11].get_str());
         if (!IsValidDestination(senderAddress))
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Qtum address to send from");
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid WATTx address to send from");
         else
             fHasSender=true;
     }
@@ -2093,7 +2093,7 @@ RPCHelpMan splitutxosforaddress()
     CTxDestination address = DecodeDestination(request.params[0].get_str());
 
     if (!IsValidDestination(address)) {
-        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid Qtum address");
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid WATTx address");
     }
     CScript scriptPubKey = GetScriptForDestination(address);
     if (!pwallet->IsMine(scriptPubKey)) {
@@ -2292,7 +2292,7 @@ RPCHelpMan sendmanywithdupes()
     for (const std::string& name_ : keys) {
         CTxDestination dest = DecodeDestination(name_);
         if (!IsValidDestination(dest)) {
-            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid Qtum address: ") + name_);
+            throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, std::string("Invalid WATTx address: ") + name_);
         }
 
         destinations.insert(dest);
