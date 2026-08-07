@@ -1610,6 +1610,60 @@ mod tests {
         }
     }
 
+    /// The wallet builds outputs as O = x*G with NO T component, i.e. y = 0.
+    ///
+    /// If the prover cannot open such an output, every note the wallet has ever
+    /// created is unspendable and the spend path needs the wallet to generate
+    /// keys differently -- a much larger change than wiring up the spend. Check
+    /// it before designing around it.
+    #[test]
+    fn test_prove_full_opens_a_y_zero_output() {
+        use dalek_ff_group::{EdwardsPoint as DfgPoint, Scalar as DfgScalar};
+        use ciphersuite::group::{ff::Field, Group, GroupEncoding};
+        use rand_core::OsRng;
+
+        unsafe {
+            assert_eq!(fcmp_init(), FCMP_SUCCESS);
+
+            let x = DfgScalar::random(&mut OsRng);
+            let y = DfgScalar::ZERO;                     // the wallet's shape
+            let o_pt = DfgPoint::generator() * x;         // O = x*G, no T term
+            let i_pt = DfgPoint::random(&mut OsRng);
+            let c_pt = DfgPoint::random(&mut OsRng);
+
+            let mut leaf = [0u8; 96];
+            leaf[..32].copy_from_slice(&o_pt.to_bytes());
+            leaf[32..64].copy_from_slice(&i_pt.to_bytes());
+            leaf[64..].copy_from_slice(&c_pt.to_bytes());
+
+            let tx_hash = [0x5Au8; 32];
+            let mut proof = vec![0u8; 64 * 1024];
+            let mut proof_len = 0usize;
+            let (mut ki, mut ct, mut cb) = ([0u8; 32], [0u8; 32], [0u8; 32]);
+
+            let rc = fcmp_prove_full(
+                proof.as_mut_ptr(), &mut proof_len, proof.len(),
+                leaf.as_ptr(), 1, 0,
+                x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
+                tx_hash.as_ptr(),
+                ki.as_mut_ptr(), ct.as_mut_ptr(), cb.as_mut_ptr());
+            assert_eq!(rc, FCMP_SUCCESS,
+                       "prover cannot open an output with y = 0 -- the wallet's notes \
+                        would all be unspendable");
+
+            let mut root = [0u8; 32];
+            assert_eq!(fcmp_compute_leaf_root(root.as_mut_ptr(), leaf.as_ptr(), 1),
+                       FCMP_SUCCESS);
+            assert_eq!(
+                fcmp_verify_full(root.as_ptr(), 1, proof.as_ptr(), proof_len,
+                                 ki.as_ptr(), ct.as_ptr(), tx_hash.as_ptr()),
+                FCMP_SUCCESS,
+                "y = 0 proof does not verify");
+
+            fcmp_cleanup();
+        }
+    }
+
     /// Layer hashing must agree with the reference implementation BYTE FOR BYTE.
     ///
     /// A curve tree whose hash differs from the prover's is worse than useless:
