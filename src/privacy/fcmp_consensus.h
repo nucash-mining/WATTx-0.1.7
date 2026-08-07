@@ -23,6 +23,7 @@
  */
 
 #include <primitives/transaction.h>
+#include <privacy/fcmp_pool_script.h>
 #include <primitives/block.h>
 #include <privacy/privacy.h>
 #include <privacy/fcmp_tx.h>
@@ -329,10 +330,10 @@ bool DecodeFcmpTransaction(const CTransaction& tx, CPrivacyTransaction& privTx);
  * the txid, which is what stops a third party rewriting a pool-spending
  * transaction's outputs (see IsPoolScript's callers).
  */
-const CScript& GetShieldedPoolScript();
-
-/** @brief Is this scriptPubKey the reserved shielded-pool script? */
-bool IsPoolScript(const CScript& scriptPubKey);
+// GetShieldedPoolScript and IsPoolScript are declared in
+// privacy/fcmp_pool_script.h, which this header includes. They are built into
+// bitcoin_common so transaction policy can reach them without pulling in the
+// whole privacy library; see that header for why.
 
 /**
  * @brief Compute the pool delta for a transaction.

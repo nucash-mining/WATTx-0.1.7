@@ -381,6 +381,18 @@ bool CurveTree::HasOutput(uint64_t index) const {
     return m_storage->GetOutput(index).has_value();
 }
 
+std::optional<uint64_t> CurveTree::FindOutputIndex(const OutputTuple& output) const {
+    // Searched newest-first: a wallet looks up a note it is about to spend, and
+    // notes are far more often recent than ancient.
+    for (uint64_t i = m_output_count; i-- > 0; ) {
+        auto stored = m_storage->GetOutput(i);
+        if (stored && *stored == output) {
+            return i;
+        }
+    }
+    return std::nullopt;
+}
+
 bool CurveTree::RemoveLastN(uint64_t count) {
     if (count == 0) return true;
     if (count > m_output_count) return false;

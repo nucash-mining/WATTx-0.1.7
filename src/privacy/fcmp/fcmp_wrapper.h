@@ -98,6 +98,32 @@ public:
     );
 
     /**
+     * A re-randomisation of one leaf, held between the two halves of a spend.
+     *
+     * Carries secrets (r_o, r_i, r_r_i, r_c). Anyone holding this and the
+     * published C~ can link the spend back to its tree leaf, so it must never
+     * leave the wallet.
+     */
+    struct Rerandomization {
+        uint64_t leaf_index{0};
+        std::vector<uint8_t> state;         //!< opaque; hand back to GenerateFullProof
+        std::array<uint8_t, 32> c_tilde{};  //!< pseudo-out C~ = C + r_c*G
+        std::array<uint8_t, 32> c_blind{};  //!< r_c -- SECRET
+    };
+
+    /**
+     * Re-randomise a leaf, yielding C~ and r_c without proving anything yet.
+     *
+     * Proving commits to the signable transaction hash, but the transaction
+     * cannot be assembled until its output commitments are known, and those are
+     * balanced against b~ = b + r_c. So r_c has to be available BEFORE the
+     * message exists, which is why this is separate from GenerateFullProof.
+     *
+     * @throws FcmpError on failure
+     */
+    Rerandomization Rerandomize(uint64_t leaf_index);
+
+    /**
      * Generate a REAL FCMP++ membership proof over the output's actual branch.
      *
      * Unlike GenerateProof (which calls the Schnorr-sigma scaffold and proves
@@ -106,23 +132,18 @@ public:
      * that binding an attacker can present any C~ they like beside a valid
      * membership proof, and value conservation becomes unenforceable.
      *
-     * @param leaf_index   index of the output in the tree
+     * @param rerandomized from Rerandomize(), for the leaf being spent
      * @param x, y         spend key components satisfying O = x*G + y*T
      * @param signable_tx_hash  message the SA+L signature commits to
      * @param key_image_out     32-byte key image L = x*I
-     * @param c_tilde_out       32-byte pseudo-out C~ = C + r_c*G
-     * @param c_blind_out       32-byte r_c -- SECRET, needed to balance
-     *                          blindings (b~ = b + r_c); never publish it
      * @throws FcmpError on failure
      */
     std::vector<uint8_t> GenerateFullProof(
-        uint64_t leaf_index,
+        const Rerandomization& rerandomized,
         const ed25519::Scalar& x,
         const ed25519::Scalar& y,
         const uint256& signable_tx_hash,
-        std::array<uint8_t, 32>& key_image_out,
-        std::array<uint8_t, 32>& c_tilde_out,
-        std::array<uint8_t, 32>& c_blind_out
+        std::array<uint8_t, 32>& key_image_out
     );
 
     /**

@@ -443,7 +443,9 @@ bool CPrivacyTransaction::VerifyFcmp() const
     return true;
 }
 
-bool CPrivacyTransaction::VerifyFcmpSelfCheck(CAmount poolDelta) const
+bool CPrivacyTransaction::VerifyFcmpSelfCheck(CAmount poolDelta,
+                                              const curvetree::TreeHash& treeRoot,
+                                              const uint256& messageHash) const
 {
     // 1. Check FCMP inputs exist
     if (fcmpInputs.empty()) {
@@ -459,16 +461,18 @@ bool CPrivacyTransaction::VerifyFcmpSelfCheck(CAmount poolDelta) const
         }
     }
 
-    // 3. Verify SA+L signature for each input
-    auto G = ed25519::Point::BasePoint();
+    // 3. Verify each input the way consensus does.
+    //
+    // This used to check a hand-rolled `s*G == R + c*O~` over inputTuple and
+    // salSignature. Those fields no longer exist as separate values: O~, I~, R
+    // and the signature live INSIDE the proof, where the audited verifier reads
+    // them, precisely so a hand-supplied copy cannot drift from what was proven.
+    // The old check therefore ran against unset fields and failed every
+    // wallet-built transaction -- and even when it passed it proved nothing
+    // about membership or about C.
     for (size_t i = 0; i < fcmpInputs.size(); i++) {
-        const auto& input = fcmpInputs[i];
-        auto sG = input.salSignature.s * G;
-        auto cO = input.salSignature.c * input.inputTuple.O_tilde;
-        auto R_plus_cO = input.inputTuple.R + cO;
-
-        if (sG.data != R_plus_cO.data) {
-            LogPrintf("FCMP SelfCheck: FAILED - input %d SA+L signature invalid\n", i);
+        if (!VerifyFcmpInput(fcmpInputs[i], treeRoot, messageHash)) {
+            LogPrintf("FCMP SelfCheck: FAILED - input %d does not verify\n", i);
             return false;
         }
     }
@@ -533,6 +537,39 @@ bool CPrivacyTransaction::VerifyFcmpSelfCheck(CAmount poolDelta) const
     return true;
 }
 
+// The transparent part of an FCMP transaction: pool inputs in, shell outputs out,
+// no witness. Both the pre-signing txid and the final transaction are built from
+// this, so the hash the proofs commit to and the hash the transaction ends up
+// with cannot diverge.
+static CMutableTransaction BuildShellSkeleton(
+    const CPrivacyTransaction::CFcmpShell& shell, int32_t version, uint32_t lockTime)
+{
+    CMutableTransaction mtx;
+    mtx.version = version;
+    mtx.nLockTime = lockTime;
+
+    for (const auto& outpoint : shell.poolInputs) {
+        // Empty scriptSig: the pool script is a native witness program, so the
+        // txid is not scriptSig-malleable. The SA+L signature commits to that
+        // txid, which is what stops a third party rewriting the outputs of a
+        // transaction paying from an anyone-can-spend script.
+        mtx.vin.emplace_back(outpoint);
+    }
+
+    for (const auto& out : shell.outputs) {
+        mtx.vout.push_back(out);
+    }
+
+    return mtx;
+}
+
+uint256 CPrivacyTransaction::ShellTxid(const CFcmpShell& shell) const
+{
+    // Same version and locktime ToFcmpTransaction will use, from this same
+    // object -- the two hashes must not be able to disagree.
+    return CTransaction(BuildShellSkeleton(shell, nVersion, nLockTime)).GetHash();
+}
+
 std::optional<CTransaction> CPrivacyTransaction::ToFcmpTransaction(const CFcmpShell& shell) const
 {
     if (privacyType != PrivacyType::FCMP) {
@@ -555,21 +592,7 @@ std::optional<CTransaction> CPrivacyTransaction::ToFcmpTransaction(const CFcmpSh
         return std::nullopt;
     }
 
-    CMutableTransaction mtx;
-    mtx.version = nVersion;
-    mtx.nLockTime = nLockTime;
-
-    for (const auto& outpoint : shell.poolInputs) {
-        // Empty scriptSig: the pool script is a native witness program, so the
-        // txid is not scriptSig-malleable. The SA+L signature commits to that
-        // txid, which is what stops a third party rewriting the outputs of a
-        // transaction paying from an anyone-can-spend script.
-        mtx.vin.emplace_back(outpoint);
-    }
-
-    for (const auto& out : shell.outputs) {
-        mtx.vout.push_back(out);
-    }
+    CMutableTransaction mtx = BuildShellSkeleton(shell, nVersion, nLockTime);
 
     // Serialize the payload behind the "FCMP" marker and attach it to vin[0]'s
     // witness, which is where DecodeFcmpTransaction looks for it.

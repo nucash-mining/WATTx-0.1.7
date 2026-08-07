@@ -397,7 +397,14 @@ static RPCHelpMan listfcmpoutputs()
                 obj.pushKV("vout", static_cast<uint64_t>(output.outpoint.n));
                 obj.pushKV("amount", ValueFromAmount(output.amount));
                 obj.pushKV("confirmations", confirmations);
-                obj.pushKV("leaf_index", output.treeLeafIndex);
+                // Looked up, not read from the record. A note's position is only
+                // decided when its block connects, so nothing stored at scan time
+                // could be right -- every note reported leaf 0.
+                if (const auto leaf = fcmpManager->ResolveLeafIndexPublic(output)) {
+                    obj.pushKV("leaf_index", *leaf);
+                } else {
+                    obj.pushKV("leaf_index", UniValue::VNULL);
+                }
                 obj.pushKV("spendable", output.IsSpendable(currentHeight, 10));
                 obj.pushKV("spent", output.spent);
 
@@ -493,15 +500,14 @@ static RPCHelpMan sendfcmp()
             // These become the transaction's real inputs, which is what
             // ToFcmpTransaction needs and what sendfcmp never had: it used to
             // emit a transaction with vin: [] that could not confirm.
-            std::vector<COutPoint> poolInputs;
-            CAmount poolTotal = 0;
             {
                 std::map<COutPoint, Coin> poolCoins;
                 if (!pwallet->chain().findPoolUtxos(poolCoins)) {
                     throw JSONRPCError(RPC_INTERNAL_ERROR,
                                        "Could not read the shielded pool's outputs");
                 }
-                if (!privacy::SelectPoolUtxos(poolCoins, amount, poolInputs, poolTotal)) {
+                if (!privacy::SelectPoolUtxos(poolCoins, amount, params.poolInputs,
+                                              params.poolTotal)) {
                     CAmount held = 0;
                     for (const auto& [op, c] : poolCoins) held += c.out.nValue;
                     throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
@@ -518,29 +524,38 @@ static RPCHelpMan sendfcmp()
                     strprintf("Failed to create FCMP transaction: %s", result.error));
             }
 
-            // Broadcast transaction
+            // Get the transaction accepted BEFORE recording anything about it.
+            //
+            // The wallet used to mark inputs spent and add the change note
+            // regardless, so a transaction the node refused -- a double spend, an
+            // underpaid fee -- still moved local state. The wallet's view then
+            // disagreed with the chain: notes it believed spent were not, and a
+            // change note existed for a transaction that did not.
+            std::string broadcastErr;
+            if (!pwallet->chain().broadcastTransaction(result.standardTx,
+                                                       pwallet->m_default_max_tx_fee,
+                                                       /*relay=*/true, broadcastErr)) {
+                throw JSONRPCError(RPC_WALLET_ERROR,
+                    strprintf("The shielded transaction was built but not accepted: %s",
+                              broadcastErr));
+            }
+
             mapValue_t mapValue;
             mapValue["comment"] = "FCMP private transaction";
             const_cast<CWallet*>(pwallet.get())->CommitTransaction(result.standardTx, std::move(mapValue), {});
 
-            // Mark spent inputs by matching key images to our outputs
-            uint256 spendingTxHash = result.standardTx->GetHash();
-            auto allOutputs = fcmpManager->GetFcmpOutputs(false);
-            for (const auto& ki : result.keyImages) {
-                uint256 kiHash = ki.GetHash();
-                for (const auto& out : allOutputs) {
-                    if (out.keyImageHash == kiHash) {
-                        fcmpManager->MarkFcmpOutputSpent(out.outpoint, spendingTxHash);
-                        break;
-                    }
-                }
+            // Mark the notes this transaction spent, by outpoint. Matching key
+            // images instead found nothing -- the key image now comes from the
+            // prover, not from the wallet's own derivation -- so every note stayed
+            // unspent and coin selection handed the same one out again.
+            const uint256 spendingTxHash = result.standardTx->GetHash();
+            for (const COutPoint& spent : result.spentOutpoints) {
+                fcmpManager->MarkFcmpOutputSpent(spent, spendingTxHash);
             }
 
             // Register change output in wallet for balance tracking
             if (result.changeOutputInfo) {
-                auto changeInfo = *result.changeOutputInfo;
-                changeInfo.outpoint = COutPoint(Txid::FromUint256(spendingTxHash), result.privacyTx.privacyOutputs.size() - 1);
-                fcmpManager->AddFcmpOutput(changeInfo);
+                fcmpManager->AddFcmpOutput(*result.changeOutputInfo);
             }
 
             UniValue ret(UniValue::VOBJ);

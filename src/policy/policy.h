@@ -174,6 +174,17 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
 */
 bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs);
 
+/**
+ * Script verification flags this node applies as POLICY to a given transaction.
+ *
+ * STANDARD_SCRIPT_VERIFY_FLAGS with any exemptions the transaction earns. Today
+ * that is one: a transaction spending the shielded pool is not subject to
+ * DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM, because the pool deliberately occupies a
+ * reserved witness version and is protected by a consensus rule rather than by
+ * script. Consensus flags are unaffected.
+ */
+unsigned int PolicyScriptVerifyFlags(const CTransaction& tx, const CCoinsViewCache& mapInputs);
+
 /** Compute the virtual transaction size (weight reinterpreted as bytes). */
 int64_t GetVirtualTransactionSize(int64_t nWeight, int64_t nSigOpCost, unsigned int bytes_per_sigop);
 int64_t GetVirtualTransactionSize(const CTransaction& tx, int64_t nSigOpCost, unsigned int bytes_per_sigop);

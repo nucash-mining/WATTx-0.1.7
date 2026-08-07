@@ -110,22 +110,20 @@ bool FcmpVerifier::Verify(const FcmpInput& input, const std::vector<uint8_t>& pr
 namespace privacy {
 namespace fcmp {
 
-std::vector<uint8_t> FcmpProver::GenerateFullProof(
+// The prover needs the whole leaf branch and our position in it -- it rebuilds
+// the leaf hash itself, so sibling scalars would not do. Both halves of a spend
+// need the identical branch, so they collect it the same way.
+static std::vector<uint8_t> CollectLeafBranch(
+    const std::shared_ptr<curvetree::CurveTree>& tree,
     uint64_t leaf_index,
-    const ed25519::Scalar& x,
-    const ed25519::Scalar& y,
-    const uint256& signable_tx_hash,
-    std::array<uint8_t, 32>& key_image_out,
-    std::array<uint8_t, 32>& c_tilde_out,
-    std::array<uint8_t, 32>& c_blind_out)
+    size_t& num_leaves_out,
+    size_t& index_in_leaves_out)
 {
-    if (!m_tree) {
+    if (!tree) {
         throw FcmpError(FCMP_ERROR_INVALID_PARAM, "No curve tree");
     }
 
-    // The prover needs the whole leaf branch and our position in it -- it
-    // rebuilds the leaf hash itself, so sibling scalars would not do.
-    auto branch_opt = m_tree->GetBranch(leaf_index);
+    auto branch_opt = tree->GetBranch(leaf_index);
     if (!branch_opt) {
         throw FcmpError(FCMP_ERROR_INVALID_PARAM, "No branch for leaf index");
     }
@@ -153,6 +151,54 @@ std::vector<uint8_t> FcmpProver::GenerateFullProof(
         leaves.insert(leaves.end(), o.C.data.begin(), o.C.data.end());
     }
 
+    num_leaves_out = branch.leaves.size();
+    index_in_leaves_out = branch.index_in_leaves;
+    return leaves;
+}
+
+FcmpProver::Rerandomization FcmpProver::Rerandomize(uint64_t leaf_index)
+{
+    size_t num_leaves = 0;
+    size_t index_in_leaves = 0;
+    const std::vector<uint8_t> leaves =
+        CollectLeafBranch(m_tree, leaf_index, num_leaves, index_in_leaves);
+
+    Rerandomization out;
+    out.leaf_index = leaf_index;
+    out.state.resize(256);
+    size_t state_len = 0;
+
+    const int32_t rc = fcmp_rerandomize(
+        leaves.data(), num_leaves, index_in_leaves,
+        out.state.data(), out.state.size(), &state_len,
+        out.c_tilde.data(), out.c_blind.data());
+
+    if (rc != FCMP_SUCCESS) {
+        throw FcmpError(rc, "fcmp_rerandomize failed");
+    }
+    out.state.resize(state_len);
+    return out;
+}
+
+std::vector<uint8_t> FcmpProver::GenerateFullProof(
+    const Rerandomization& rerandomized,
+    const ed25519::Scalar& x,
+    const ed25519::Scalar& y,
+    const uint256& signable_tx_hash,
+    std::array<uint8_t, 32>& key_image_out)
+{
+    if (rerandomized.state.empty()) {
+        throw FcmpError(FCMP_ERROR_INVALID_PARAM,
+                        "Re-randomize the leaf before proving it");
+    }
+
+    // Same leaf, same branch as Rerandomize() saw. A different branch here would
+    // make the SA+L proof and the membership proof speak about different outputs.
+    size_t num_leaves = 0;
+    size_t index_in_leaves = 0;
+    const std::vector<uint8_t> leaves =
+        CollectLeafBranch(m_tree, rerandomized.leaf_index, num_leaves, index_in_leaves);
+
     const std::vector<uint8_t> xb = x.GetBytes();
     const std::vector<uint8_t> yb = y.GetBytes();
     if (xb.size() != 32 || yb.size() != 32) {
@@ -164,10 +210,11 @@ std::vector<uint8_t> FcmpProver::GenerateFullProof(
 
     const int32_t rc = fcmp_prove_full(
         proof.data(), &proof_len, proof.size(),
-        leaves.data(), branch.leaves.size(), branch.index_in_leaves,
+        leaves.data(), num_leaves, index_in_leaves,
         xb.data(), yb.data(),
         signable_tx_hash.begin(),
-        key_image_out.data(), c_tilde_out.data(), c_blind_out.data());
+        rerandomized.state.data(), rerandomized.state.size(),
+        key_image_out.data());
 
     if (rc != FCMP_SUCCESS) {
         throw FcmpError(rc, "fcmp_prove_full failed");

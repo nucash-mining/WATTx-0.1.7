@@ -307,6 +307,40 @@ int32_t fcmp_verify(const uint8_t *tree_root,
                     uintptr_t proof_len);
 
 /**
+ * Re-randomize the output being spent, WITHOUT yet proving anything about it.
+ *
+ * This is the first half of a spend. It exists because proving needs the signable
+ * transaction hash, and the transaction cannot be built until its output
+ * commitments are known -- and those depend on `r_c`, which re-randomization
+ * draws. Doing both in one call is therefore circular: `r_c` would only become
+ * available after the message it had to be committed under was already fixed.
+ *
+ * So: re-randomize first, learn `C~` and `r_c`, balance and assemble the
+ * transaction, and then call `fcmp_prove_full` with the saved re-randomization
+ * and the resulting hash. `RerandomizedOutput::write` is provided by the fcmp++
+ * crate for exactly this ("saving a re-randomization to prove for the output's
+ * membership later").
+ *
+ * `rerand_out` receives the serialized re-randomization, to be handed back to
+ * `fcmp_prove_full` unchanged. It holds `r_o`, `r_i`, `r_r_i` and `r_c`:
+ * **SECRET**, and enough to link the spend to its tree leaf. 256 bytes is ample.
+ *
+ * `c_blind_out` receives `+r_c` (not the negated form the proof consumes), since
+ * `C~ = C + r_c·G` means the pseudo-out's blinding is `b~ = b + r_c`.
+ *
+ * # Safety
+ * All pointers must be valid for the described lengths.
+ */
+int32_t fcmp_rerandomize(const uint8_t *leaves_data,
+                         uintptr_t num_leaves,
+                         uintptr_t our_leaf_index,
+                         uint8_t *rerand_out,
+                         uintptr_t rerand_max_len,
+                         uintptr_t *rerand_len_out,
+                         uint8_t *c_tilde_out,
+                         uint8_t *c_blind_out);
+
+/**
  * Generate a real FCMP++ membership proof for a leaf-level tree (1 layer: leaves → root).
  *
  * The caller provides all outputs in the leaf branch (`leaves_data`, `num_leaves` × 96 bytes,
@@ -315,15 +349,17 @@ int32_t fcmp_verify(const uint8_t *tree_root,
  * `O = x·G + y·T`, and the 32-byte `signable_tx_hash`.
  *
  * On success the serialised `FcmpPlusPlus` proof is written to `proof_out`, its length to
- * `*proof_len_out`, the key image `L = x·I` to `key_image_out`, the pseudo-out `C~` to
- * `c_tilde_out`, and the commitment re-randomiser `r_c` to `c_blind_out`.  All three 32-byte
- * output buffers must be provided by the caller.
+ * `*proof_len_out`, and the key image `L = x·I` to `key_image_out`.
  *
- * `r_c` is required by the caller, not merely informative: the re-randomisation is
- * `C~ = C + r_c·G`, so the blinding of the pseudo-out is `b~ = b + r_c`, and a spender cannot
- * balance a transaction's output blindings against its inputs without it.  The blinds are drawn
- * inside `RerandomizedOutput::new` from the OS RNG, so this is the only way out.  Treat it as
- * secret: publishing `r_c` alongside `C~` would re-link the input to its tree leaf.
+ * `rerand_data` is the re-randomization saved by `fcmp_rerandomize`, which must be called first.
+ * The two are split because proving commits to `signable_tx_hash`, but the transaction being
+ * hashed cannot be assembled until its output commitments are known, and those depend on the
+ * `r_c` that re-randomization draws.  Drawing the blinds here as well would make that circular.
+ * `C~` and `r_c` therefore come from `fcmp_rerandomize`; this function does not return them.
+ *
+ * `leaves_data`, `num_leaves` and `our_leaf_index` must describe the SAME leaf and branch that
+ * were re-randomized, or the SAL proof and the membership proof will be about different outputs
+ * and verification fails.
  *
  * # Safety
  * All pointers must be valid for the described lengths.
@@ -337,9 +373,9 @@ int32_t fcmp_prove_full(uint8_t *proof_out,
                         const uint8_t *x_bytes,
                         const uint8_t *y_bytes,
                         const uint8_t *tx_hash,
-                        uint8_t *key_image_out,
-                        uint8_t *c_tilde_out,
-                        uint8_t *c_blind_out);
+                        const uint8_t *rerand_data,
+                        uintptr_t rerand_len,
+                        uint8_t *key_image_out);
 
 /**
  * Verify a real FCMP++ membership proof produced by `fcmp_prove_full`.

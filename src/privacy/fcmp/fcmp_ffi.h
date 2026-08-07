@@ -257,7 +257,45 @@ int32_t fcmp_verify(
 // ============================================================================
 
 /**
+ * Re-randomise the output being spent, without yet proving anything about it.
+ *
+ * First half of a spend, and separate from fcmp_prove_full because proving
+ * commits to a transaction hash, while the transaction cannot be assembled until
+ * its output commitments are known -- and those depend on r_c, which
+ * re-randomisation draws. One combined call would be circular.
+ *
+ * leaves_data    - num_leaves * 96 bytes (O || I || C per output, compressed Ed25519)
+ * num_leaves     - number of outputs in the leaf branch (1 .. LAYER_ONE_LEN=38)
+ * our_leaf_index - index of the output being spent within leaves_data (0-based)
+ * rerand_out     - receives the serialised re-randomisation; hand back to
+ *                  fcmp_prove_full unchanged. SECRET: it holds r_o, r_i, r_r_i
+ *                  and r_c, which link the spend to its tree leaf. 256 bytes is ample.
+ * c_tilde_out    - 32-byte output: pseudo-out C~ (pass to fcmp_verify_full)
+ * c_blind_out    - 32-byte output: r_c, the commitment re-randomiser. SECRET.
+ *
+ * The re-randomisation is C~ = C + r_c*G, so the pseudo-out's blinding is
+ * b~ = b + r_c. A spender needs r_c to balance the transaction's output blindings
+ * against its inputs; without it the balance equation is unsatisfiable even for an
+ * honest sender. Never publish it: r_c + C~ re-links the input to its tree leaf.
+ *
+ * @return FCMP_SUCCESS on success
+ */
+int32_t fcmp_rerandomize(
+    const uint8_t* leaves_data,
+    size_t         num_leaves,
+    size_t         our_leaf_index,
+    uint8_t*       rerand_out,
+    size_t         rerand_max_len,
+    size_t*        rerand_len_out,
+    uint8_t*       c_tilde_out,
+    uint8_t*       c_blind_out
+);
+
+/**
  * Generate a real FCMP++ membership proof for a 1-layer (leaf-only) tree.
+ *
+ * Second half of a spend: call fcmp_rerandomize first, assemble the transaction
+ * using the C~ and r_c it returns, then call this with the resulting hash.
  *
  * leaves_data   - num_leaves * 96 bytes (O || I || C per output, each 32-byte compressed Ed25519)
  * num_leaves    - number of outputs in the leaf branch (1 .. LAYER_ONE_LEN=38)
@@ -265,14 +303,13 @@ int32_t fcmp_verify(
  * x_bytes       - 32-byte spend key x  (O = x*G + y*T)
  * y_bytes       - 32-byte spend key y
  * tx_hash       - 32-byte signable transaction hash
+ * rerand_data   - the re-randomisation saved by fcmp_rerandomize
+ * rerand_len    - its length
  * key_image_out - 32-byte output: key image L = x*I
- * c_tilde_out   - 32-byte output: pseudo-out C~ (pass to fcmp_verify_full)
- * c_blind_out   - 32-byte output: r_c, the commitment re-randomiser. SECRET.
  *
- * The re-randomisation is C~ = C + r_c*G, so the pseudo-out's blinding is
- * b~ = b + r_c. A spender needs r_c to balance the transaction's output blindings
- * against its inputs; without it the balance equation is unsatisfiable even for an
- * honest sender. Never publish it: r_c + C~ re-links the input to its tree leaf.
+ * leaves_data, num_leaves and our_leaf_index must describe the SAME leaf and
+ * branch that were re-randomised, or the SAL proof and the membership proof are
+ * about different outputs and verification fails.
  *
  * @return FCMP_SUCCESS on success
  */
@@ -286,9 +323,9 @@ int32_t fcmp_prove_full(
     const uint8_t* x_bytes,
     const uint8_t* y_bytes,
     const uint8_t* tx_hash,
-    uint8_t*       key_image_out,
-    uint8_t*       c_tilde_out,
-    uint8_t*       c_blind_out
+    const uint8_t* rerand_data,
+    size_t         rerand_len,
+    uint8_t*       key_image_out
 );
 
 /**

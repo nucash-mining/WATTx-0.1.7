@@ -28,6 +28,7 @@
 #include <privacy/fcmp_tx.h>
 #include <privacy/ed25519/ed25519_types.h>
 #include <privacy/curvetree/curve_tree.h>
+#include <privacy/fcmp/fcmp_wrapper.h>  // FcmpProver::Rerandomization, used below
 #include <wallet/stealth_wallet.h>
 #include <policy/feerate.h>
 #include <sync.h>
@@ -124,8 +125,19 @@ struct CFcmpTransactionResult
     // Error message if failed
     std::string error;
 
-    // Change output info (if any) - must be registered in wallet after commit
+    //! Change output info, with its outpoint already filled in. Register it in
+    //! the wallet ONLY after the transaction is actually accepted.
     std::optional<CFcmpOutputInfo> changeOutputInfo;
+
+    //! The notes this transaction spends.
+    //!
+    //! Recorded by outpoint rather than left for the caller to recover by
+    //! matching key images: the key image now comes from the prover, and matching
+    //! it against a separately derived one silently found nothing, so spent notes
+    //! stayed marked unspent and the wallet kept reselecting them -- building
+    //! transaction after transaction that consensus rejected as
+    //! fcmp-keyimage-spent.
+    std::vector<COutPoint> spentOutpoints;
 };
 
 /**
@@ -183,6 +195,16 @@ struct CFcmpTransactionParams
 
     // Message to include in transaction (optional)
     std::vector<uint8_t> txMessage;
+
+    //! The pool UTXOs this spend consumes, and what they are worth.
+    //!
+    //! The shielded pool's script is not wallet-owned, so its coins cannot come
+    //! from wallet coin selection -- the caller reads them from the chain's UTXO
+    //! set (Chain::findPoolUtxos + SelectPoolUtxos) and passes them here. They
+    //! become the transaction's real inputs; without them there is nothing to
+    //! spend and no witness to carry the payload.
+    std::vector<COutPoint> poolInputs;
+    CAmount poolTotal{0};
 };
 
 /**
@@ -239,6 +261,12 @@ public:
         const std::vector<CFcmpRecipient>& recipients,
         const CFcmpTransactionParams& params = CFcmpTransactionParams());
 
+    //! ResolveLeafIndex for callers outside the class (RPC display).
+    //!
+    //! Takes cs_fcmp itself, unlike the private version, which the spend path
+    //! calls with the lock already held.
+    std::optional<uint64_t> ResolveLeafIndexPublic(const CFcmpOutputInfo& output) const;
+
     /**
      * @brief Estimate fee for an FCMP transaction
      * @param numInputs Number of inputs
@@ -250,6 +278,16 @@ public:
         size_t numInputs,
         size_t numOutputs,
         const CFeeRate& feeRate) const;
+
+    /**
+     * @brief Virtual size an FCMP spend of this shape will have.
+     *
+     * Deliberately a slight overestimate. The proofs are generated before the
+     * transaction can be measured, so an underestimate is only discovered after
+     * seconds of proving have been spent and the transaction has already been
+     * rejected for not meeting the relay minimum.
+     */
+    static size_t EstimateVirtualSize(size_t numInputs, size_t numOutputs);
 
     /**
      * @brief Create a shield transaction (transparent to FCMP)
@@ -445,15 +483,54 @@ public:
      * @brief Create output tuple from stealth address derivation
      * @param stealthAddr Recipient stealth address
      * @param amount Amount to send
-     * @param blinding Output: blinding factor used
+     * @param blinding In/out: see @p blindingPolicy
      * @param privKey Output: private key (if we're the recipient)
+     * @param oneTimePubKey Output: the DKSAP one-time public key. Needed to
+     *        encrypt the note's amount, which is the only way the recipient
+     *        learns what the note is worth.
+     * @param ephemeralPubKey Output: the DKSAP ephemeral pubkey R. MUST be
+     *        published in the note, or the recipient cannot scan for it:
+     *        detection re-derives the one-time key from R and checks it against
+     *        O, so a note without R is undetectable by anyone but its author.
+     * @param blindingPolicy how @p blinding is determined
      * @return Output tuple for curve tree
      */
+    enum class BlindingPolicy {
+        //! Force blinding to zero. Correct for a SHIELD: with no shielded inputs
+        //! the invariant is delta*H == sum(note C), and delta*H carries no
+        //! blinding, so a blinded note could never balance.
+        Zero,
+        //! Derive it from the one-time public key, exactly as the scanner does
+        //! (Hash(oneTimePubKey || 0x42)). Correct for a note paid to someone
+        //! else in a SPEND: the recipient must be able to recover the blinding
+        //! to spend the note later, and this is the only channel available --
+        //! the note format carries no encrypted amount field.
+        DerivedFromOneTimeKey,
+        //! Use the blinding the caller supplied, unchanged. For the balancing
+        //! output, whose blinding is fixed by the other outputs and the inputs
+        //! and so cannot be derived. Only ever use this for a note the wallet
+        //! keeps (change), because nobody else could recover it.
+        Explicit,
+    };
+
     curvetree::OutputTuple CreateOutputTuple(
         const privacy::CStealthAddress& stealthAddr,
         CAmount amount,
         ed25519::Scalar& blinding,
-        std::optional<ed25519::Scalar>& privKey) const;
+        std::optional<ed25519::Scalar>& privKey,
+        CPubKey& ephemeralPubKey,
+        CPubKey& oneTimePubKey,
+        BlindingPolicy blindingPolicy) const;
+
+    //! Build the OP_RETURN a note is published in: "FCMP" || O || I || C || R.
+    //!
+    //! Consensus (ExtractFcmpOutputs) reads only O, I and C and ignores what
+    //! follows, so R rides along for wallets: the scanner reads it at offset 100
+    //! to re-derive the one-time key and recognise the note as its own.
+    static CScript BuildNoteScript(const curvetree::OutputTuple& tuple,
+                                   const CPubKey& ephemeralPubKey,
+                                   const CPubKey& oneTimePubKey,
+                                   CAmount amount);
 
 private:
     CWallet* m_wallet;
@@ -494,17 +571,30 @@ private:
      * @param messageHash Transaction message hash
      * @return FCMP input or nullopt on error
      */
-    //! Build one FCMP input using the REAL prover.
+    //! Build one FCMP input using the REAL prover -- the second half of a spend.
     //!
-    //! @param c_blind_out receives r_c, the commitment re-randomiser the prover
-    //!        drew internally. The pseudo-output is C~ = C + r_c*G, so its
-    //!        blinding is b~ = b + r_c, and the caller MUST use b~ (not b) when
-    //!        balancing the outputs or the transaction cannot balance. SECRET:
-    //!        publishing r_c alongside C~ re-links the input to its tree leaf.
+    //! @param rerandomized what FcmpProver::Rerandomize produced for this note.
+    //!        It fixes C~ and r_c, which the caller already needed to balance the
+    //!        transaction's output commitments before @p messageHash could exist.
+    //! @param messageHash the message the SA+L signature commits to. Must be
+    //!        Hash(tx.GetHash()) of the assembled shell -- what consensus
+    //!        recomputes -- or the proof verifies nowhere but here.
     std::optional<privacy::CFcmpInput> BuildFcmpInput(
         const CFcmpOutputInfo& output,
-        const uint256& messageHash,
-        ed25519::Scalar& c_blind_out) EXCLUSIVE_LOCKS_REQUIRED(cs_fcmp);
+        const privacy::fcmp::FcmpProver::Rerandomization& rerandomized,
+        const uint256& messageHash) EXCLUSIVE_LOCKS_REQUIRED(cs_fcmp);
+
+    //! The leaf index this note actually occupies in the curve tree, looked up
+    //! rather than remembered.
+    //!
+    //! The index cannot be known when the note is built: the note enters the
+    //! tree only when its block connects, behind whatever other wallets
+    //! published first. Both places that used to set it read
+    //! m_curveTree->GetOutputCount() before the tree had grown, so every note
+    //! recorded leaf 0 -- and the prover was then asked to open leaf 0 with a
+    //! different note's key. Returns nullopt while the note is unconfirmed.
+    std::optional<uint64_t> ResolveLeafIndex(const CFcmpOutputInfo& output) const
+        EXCLUSIVE_LOCKS_REQUIRED(cs_fcmp);
 
     /**
      * @brief Compute transaction message hash

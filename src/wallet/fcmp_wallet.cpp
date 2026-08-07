@@ -9,6 +9,7 @@
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 #include <privacy/fcmp/fcmp_wrapper.h>
+#include <privacy/fcmp_consensus.h>
 #include <privacy/ed25519/pedersen.h>
 #include <privacy/stealth.h>
 #include <hash.h>
@@ -48,6 +49,22 @@ bool MakeCommitment(CAmount amount, const ed25519::Scalar& blinding,
     return privacy::CreateCommitment(amount, ToBlindingFactor(blinding), out);
 }
 
+//! Keystream for the note's encrypted amount, from the one-time public key.
+//!
+//! The recipient reconstructs that key while scanning, so this needs no extra
+//! channel -- the same trick the blinding derivation uses, under a different
+//! domain separator so the two never coincide.
+uint64_t AmountMask(const CPubKey& oneTimePubKey)
+{
+    std::vector<uint8_t> input(oneTimePubKey.begin(), oneTimePubKey.end());
+    input.push_back(0x43); // domain separator for amount encryption
+    const uint256 h = Hash(input);
+    uint64_t mask = 0;
+    for (int i = 0; i < 8; ++i) {
+        mask |= static_cast<uint64_t>(h.begin()[i]) << (8 * i);
+    }
+    return mask;
+}
 } // namespace
 
 // ============================================================================
@@ -92,10 +109,20 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
     }
 
     // Estimate fee if not fixed
+    //
+    // A default-constructed CFeeRate is ZERO, which produced a zero fee and a
+    // transaction the node then refused to relay -- after several seconds of
+    // proving. Fall back to what the node will actually accept.
+    CFeeRate feeRate = params.feeRate;
+    if (feeRate == CFeeRate(0)) {
+        feeRate = m_wallet->chain().relayMinFee();
+    }
+
     CAmount fee = params.fixedFee;
     if (fee == 0) {
-        // Estimate based on typical FCMP transaction size
-        fee = EstimateFee(2, recipients.size() + 1, params.feeRate);
+        // One input is the common case; the count is not known until selection,
+        // so size for two and let the surplus be a tip rather than a rejection.
+        fee = EstimateFee(2, recipients.size() + 1, feeRate);
     }
 
     // Calculate target amount
@@ -123,51 +150,100 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
         // Don't change - fee comes from output
     }
 
-    // Compute message hash for signatures
-    uint256 messageHash = ComputeMessageHash(selectedInputs, recipients, fee);
-
     // Check we have a curve tree
     if (!m_curveTree) {
         result.error = "Curve tree not initialized";
         return result;
     }
 
-    // Build privacy transaction
+    // Split the recipients: shielded ones become notes with hidden amounts,
+    // transparent ones take value out of the pool in the clear (a deshield).
+    CAmount deshieldTotal = 0;
+    for (const auto& recipient : recipients) {
+        if (!recipient.IsStealthRecipient()) {
+            deshieldTotal += recipient.amount;
+        }
+    }
+
     result.privacyTx.privacyType = privacy::PrivacyType::FCMP;
     result.privacyTx.nFee = fee;
     result.fee = fee;
 
-    // Build FCMP inputs, keeping each pseudo-output's blinding.
+    // ---- Phase 1: re-randomise the inputs -------------------------------
     //
-    // The prover re-randomises as C~ = C + r_c*G, so the pseudo-output commits
-    // to the same value under blinding b~ = b + r_c. Balancing the outputs
-    // against the ORIGINAL b would leave the G-components uncancelled and the
-    // transaction could never balance -- with nothing to indicate why.
+    // Proving has to wait: the SA+L signature commits to the transaction hash,
+    // and the transaction cannot be assembled until its output commitments are
+    // known -- and those are balanced against b~ = b + r_c. So r_c has to exist
+    // before the message does. Re-randomising first and proving in phase 2 is
+    // what breaks that circle.
+    struct PreparedInput {
+        CFcmpOutputInfo note;
+        privacy::fcmp::FcmpProver::Rerandomization rerandomized;
+    };
+    std::vector<PreparedInput> prepared;
+    prepared.reserve(selectedInputs.size());
+
     std::vector<privacy::CBlindingFactor> inputBlinds;
     inputBlinds.reserve(selectedInputs.size());
 
+    // The G-component the outputs must reproduce: sum over inputs of b + r_c.
+    ed25519::Scalar inputBlindSum = ed25519::Scalar::Zero();
+
     for (const auto& input : selectedInputs) {
-        ed25519::Scalar r_c;
-        auto fcmpInput = BuildFcmpInput(input, messageHash, r_c);
-        if (!fcmpInput) {
-            result.error = "Failed to build FCMP input";
+        const auto leafIndex = ResolveLeafIndex(input);
+        if (!leafIndex) {
+            result.error = strprintf("Note %s is not in the curve tree yet; it cannot "
+                                     "be spent until the block carrying it connects",
+                                     input.outpoint.ToString());
             return result;
         }
 
-        inputBlinds.push_back(ToBlindingFactor(input.blinding + r_c));
+        privacy::fcmp::FcmpProver::Rerandomization rr;
+        try {
+            privacy::fcmp::FcmpContext ctx;
+            privacy::fcmp::FcmpProver prover(m_curveTree);
+            rr = prover.Rerandomize(*leafIndex);
+        } catch (const std::exception& e) {
+            result.error = strprintf("Re-randomisation failed: %s", e.what());
+            return result;
+        }
 
-        result.privacyTx.fcmpInputs.push_back(*fcmpInput);
-        result.keyImages.push_back(fcmpInput->keyImage);
+        const ed25519::Scalar r_c =
+            ed25519::Scalar::FromBytesModOrder(rr.c_blind.data(), 32);
+        const ed25519::Scalar bTilde = input.blinding + r_c;
+
+        inputBlindSum = inputBlindSum + bTilde;
+        inputBlinds.push_back(ToBlindingFactor(bTilde));
+        prepared.push_back(PreparedInput{input, std::move(rr)});
     }
 
-    // Build outputs
+    // ---- Build the outputs ----------------------------------------------
+    //
+    // Blindings are settled BEFORE any commitment is computed, so nothing has to
+    // be rebuilt afterwards and no proof can end up bound to a commitment the
+    // transaction does not carry.
+    //
+    // Each note paid to someone else takes a blinding derived from its one-time
+    // key, which is the only way its owner can ever recover it. The CHANGE note
+    // absorbs whatever is left to make the sums match. That assignment is not
+    // interchangeable: the balancing blinding cannot be derived from anything
+    // public, so it has to land on the one note we keep.
     CAmount changeAmount = inputTotal - totalOutput - fee;
+    if (changeAmount < 0) {
+        result.error = "Selected inputs insufficient for amount + fee";
+        return result;
+    }
 
-    // Blindings and amounts of the SHIELDED outputs, in the order they are added
-    // to privacyOutputs. Needed to balance the blindings and then range-prove the
-    // final commitments.
+    struct ShieldedOutput {
+        curvetree::OutputTuple tuple;
+        CPubKey ephemeralPubKey;
+        CPubKey oneTimePubKey;
+        CAmount amount{0};
+    };
+    std::vector<ShieldedOutput> notes;
     std::vector<privacy::CBlindingFactor> outputBlinds;
     std::vector<CAmount> outputAmounts;
+    ed25519::Scalar recipientBlindSum = ed25519::Scalar::Zero();
 
     for (size_t i = 0; i < recipients.size(); ++i) {
         const auto& recipient = recipients[i];
@@ -182,35 +258,31 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
             }
         }
 
-        // Create output
         privacy::CPrivacyOutput privOutput;
 
         if (recipient.IsStealthRecipient()) {
-            // Full privacy: stealth address output with hidden amount
-            CKey ephemeralKey;
-            ephemeralKey.MakeNewKey(true);
-            privacy::GenerateStealthDestination(
-                recipient.stealthAddress,
-                ephemeralKey,
-                privOutput.stealthOutput
-            );
+            ed25519::Scalar blinding;
+            std::optional<ed25519::Scalar> outPrivKey;
+            CPubKey ephemeralPubKey;
+            CPubKey oneTimePubKey;
+            curvetree::OutputTuple tuple = CreateOutputTuple(
+                recipient.stealthAddress, outputAmount, blinding, outPrivKey,
+                ephemeralPubKey, oneTimePubKey,
+                BlindingPolicy::DerivedFromOneTimeKey);
 
-            // Create commitment for confidential amount. The blinding is
-            // provisional: the LAST shielded output's blinding is replaced below
-            // so the whole set balances the inputs, and its commitment is then
-            // recomputed. Proving range before that would bind the proof to a
-            // commitment the transaction does not end up carrying.
-            ed25519::Scalar blinding = ed25519::Scalar::Random();
             if (!MakeCommitment(outputAmount, blinding,
                                 privOutput.confidentialOutput.commitment)) {
                 result.error = "Failed to create output commitment";
                 return result;
             }
+
+            recipientBlindSum = recipientBlindSum + blinding;
             outputBlinds.push_back(ToBlindingFactor(blinding));
             outputAmounts.push_back(outputAmount);
+            notes.push_back(ShieldedOutput{tuple, ephemeralPubKey, oneTimePubKey, outputAmount});
         } else {
-            // Deshielding: regular script output (sender privacy preserved,
-            // recipient receives to a standard address with visible amount)
+            // Deshielding: a transparent output. Its value is explicit and is
+            // accounted for by the pool delta, not by a commitment.
             privOutput.scriptPubKey = recipient.scriptPubKey;
         }
 
@@ -218,109 +290,71 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
         result.privacyTx.privacyOutputs.push_back(privOutput);
     }
 
-    // Add change output if needed
-    if (changeAmount > 0) {
-        // Get our own stealth address for change
+    // The change note, which always exists -- even at zero value.
+    //
+    // It is what makes the transaction balance, so it is not optional: with no
+    // change note the balancing blinding would have to go on a recipient's note,
+    // and the recipient could never reconstruct it. A zero-value note costs an
+    // OP_RETURN and nothing else.
+    {
         auto* stealthMgr = m_wallet->GetStealthAddressManager();
-        privacy::CStealthAddress changeAddr;
-        bool haveChangeAddr = false;
-
-        if (stealthMgr && stealthMgr->HasStealthAddresses()) {
-            auto addresses = stealthMgr->GetStealthAddresses();
-            if (!addresses.empty()) {
-                changeAddr = addresses[0].address;
-                haveChangeAddr = true;
-            }
+        if (!stealthMgr || !stealthMgr->HasStealthAddresses()) {
+            result.error = "No stealth address available for change; a shielded spend "
+                           "needs one to balance against";
+            return result;
         }
+        const privacy::CStealthAddress changeAddr = stealthMgr->GetStealthAddresses()[0].address;
 
-        // Generate stealth destination for change
+        // b_change = sum(b_in + r_c) - sum(recipient blindings), so that
+        // sum(output blindings) == sum(input blindings) exactly.
+        ed25519::Scalar changeBlinding = inputBlindSum - recipientBlindSum;
+
+        std::optional<ed25519::Scalar> changePk;
+        CPubKey changeEphemeral;
+        CPubKey changeOneTime;
+        curvetree::OutputTuple changeTuple = CreateOutputTuple(
+            changeAddr, changeAmount, changeBlinding, changePk, changeEphemeral,
+            changeOneTime, BlindingPolicy::Explicit);
+
         privacy::CPrivacyOutput changeOutput;
-        ed25519::Scalar changeBlinding = ed25519::Scalar::Random();
-
-        if (haveChangeAddr) {
-            CKey changeEphemeral;
-            changeEphemeral.MakeNewKey(true);
-            privacy::GenerateStealthDestination(
-                changeAddr,
-                changeEphemeral,
-                changeOutput.stealthOutput
-            );
-        }
-
         if (!MakeCommitment(changeAmount, changeBlinding,
                             changeOutput.confidentialOutput.commitment)) {
             result.error = "Failed to create change commitment";
             return result;
         }
-        outputBlinds.push_back(ToBlindingFactor(changeBlinding));
-        outputAmounts.push_back(changeAmount);
         changeOutput.nValue = changeAmount;
-
         result.privacyTx.privacyOutputs.push_back(changeOutput);
 
-        // Track change output as our own FCMP output
-        if (haveChangeAddr) {
-            CFcmpOutputInfo changeInfo;
-            changeInfo.amount = changeAmount;
-            changeInfo.blinding = changeBlinding;
-            changeInfo.blockHeight = -1;
-            changeInfo.spent = false;
-            changeInfo.nTime = GetTime();
+        outputBlinds.push_back(ToBlindingFactor(changeBlinding));
+        outputAmounts.push_back(changeAmount);
+        notes.push_back(ShieldedOutput{changeTuple, changeEphemeral, changeOneTime, changeAmount});
 
-            // Derive key for change using stealth protocol
-            std::optional<ed25519::Scalar> changePk;
-            changeInfo.outputTuple = CreateOutputTuple(changeAddr, changeAmount, changeInfo.blinding, changePk);
-            if (changePk) {
-                changeInfo.privKey = *changePk;
-            }
-
-            auto changeKI = GenerateKeyImage(changeInfo.privKey, changeInfo.outputTuple.O);
-            changeInfo.keyImageHash = changeKI.GetHash();
-            // Store in result - caller adds to wallet after tx commit
-            result.changeOutputInfo = changeInfo;
+        // Remember it, so the wallet can spend it later. The change blinding is
+        // the one value in the transaction that cannot be re-derived from public
+        // data, so if this record is lost the note is lost with it.
+        CFcmpOutputInfo changeInfo;
+        changeInfo.amount = changeAmount;
+        changeInfo.blinding = changeBlinding;
+        changeInfo.outputTuple = changeTuple;
+        changeInfo.blockHeight = -1;
+        changeInfo.spent = false;
+        changeInfo.nTime = GetTime();
+        if (changePk) {
+            changeInfo.privKey = *changePk;
+            changeInfo.keyImageHash =
+                GenerateKeyImage(changeInfo.privKey, changeTuple.O).GetHash();
         }
+        result.changeOutputInfo = changeInfo;
     }
 
-    // Balance the output blindings against the inputs, THEN range-prove.
-    //
-    // Previously every output got an independent random blinding and no range
-    // proof was produced at all, so the G-components never cancelled and the
-    // transaction could not satisfy the balance equation even with correct
-    // values. The last shielded output's blinding is replaced with
-    // sum(inputBlinds) - sum(other outputBlinds) and its commitment recomputed.
-    if (!outputBlinds.empty()) {
-        if (inputBlinds.empty()) {
-            result.error = "Shielded outputs with no shielded inputs to fund them";
-            return result;
-        }
-        if (!privacy::BalanceBlindingFactors(inputBlinds, outputBlinds)) {
-            result.error = "Failed to balance blinding factors";
-            return result;
-        }
-
-        // Recompute the last shielded output's commitment with its new blinding,
-        // and mirror it back into the transaction -- outputBlinds is only a
-        // working copy.
-        const size_t last = outputBlinds.size() - 1;
-        privacy::CPedersenCommitment rebuilt;
-        if (!privacy::CreateCommitment(outputAmounts[last], outputBlinds[last], rebuilt)) {
-            result.error = "Failed to recompute the balancing commitment";
-            return result;
-        }
-
+    // Range-prove the final commitments, in the order they appear.
+    {
         std::vector<privacy::CPedersenCommitment> finalCommitments;
-        size_t shieldedIdx = 0;
-        for (auto& out : result.privacyTx.privacyOutputs) {
+        finalCommitments.reserve(outputAmounts.size());
+        for (const auto& out : result.privacyTx.privacyOutputs) {
             if (out.confidentialOutput.commitment.IsNull()) continue;
-            if (shieldedIdx == last) {
-                out.confidentialOutput.commitment = rebuilt;
-            }
             finalCommitments.push_back(out.confidentialOutput.commitment);
-            shieldedIdx++;
         }
-
-        // Prove range over the FINAL commitments. Proving earlier would bind the
-        // proof to a commitment the transaction no longer carries.
         if (!privacy::CreateAggregatedRangeProof(outputAmounts, outputBlinds,
                                                  finalCommitments,
                                                  result.privacyTx.aggregatedRangeProof)) {
@@ -329,29 +363,117 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
         }
     }
 
-    // Self-verify: SA+L signatures, range proof, and value conservation against
-    // the pool delta this transaction will express transparently. The membership
-    // proof is deferred to consensus, which has the chain's tree root.
+    // ---- Assemble the transparent shell ---------------------------------
     //
-    // The delta is negative by the fee: the shell spends pool UTXOs covering the
-    // inputs and pays back the outputs, with the fee coming out of the pool.
-    const CAmount poolDelta = -fee;
-    if (!result.privacyTx.VerifyFcmpSelfCheck(poolDelta)) {
+    // The shell is what carries real coin: it spends pool UTXOs and pays a
+    // smaller amount back into the pool, and consensus reads the pool delta from
+    // those transparent values rather than from anything the payload claims.
+    privacy::CPrivacyTransaction::CFcmpShell shell;
+    shell.poolInputs = params.poolInputs;
+
+    for (const auto& note : notes) {
+        shell.outputs.emplace_back(0, BuildNoteScript(note.tuple, note.ephemeralPubKey,
+                                                      note.oneTimePubKey, note.amount));
+    }
+    for (const auto& recipient : recipients) {
+        if (!recipient.IsStealthRecipient()) {
+            shell.outputs.emplace_back(recipient.amount, recipient.scriptPubKey);
+        }
+    }
+
+    const CAmount poolReturn = params.poolTotal - fee - deshieldTotal;
+    if (poolReturn < 0) {
+        result.error = strprintf("The selected pool outputs (%s) cannot cover the fee "
+                                 "and deshielded value (%s)",
+                                 FormatMoney(params.poolTotal),
+                                 FormatMoney(fee + deshieldTotal));
+        return result;
+    }
+    shell.outputs.emplace_back(poolReturn, privacy::GetShieldedPoolScript());
+
+    // ---- Phase 2: prove, against the hash of the assembled shell ---------
+    //
+    // The message MUST be what consensus recomputes -- Hash(tx.GetHash()) -- or
+    // no proof this wallet builds can ever verify. It used to be a private hash
+    // over the inputs and recipients, which consensus had no way to reconstruct.
+    //
+    // Witness data is excluded from the txid, so the payload can be attached
+    // afterwards without disturbing the hash it commits to. That is also what
+    // stops a third party rewriting the outputs of a transaction paying from an
+    // anyone-can-spend pool script.
+    const uint256 shellTxid = result.privacyTx.ShellTxid(shell);
+    HashWriter messageHasher{};
+    messageHasher << shellTxid;
+    const uint256 messageHash = messageHasher.GetHash();
+
+    for (auto& p : prepared) {
+        auto fcmpInput = BuildFcmpInput(p.note, p.rerandomized, messageHash);
+        if (!fcmpInput) {
+            result.error = "Failed to build FCMP input";
+            return result;
+        }
+        result.privacyTx.fcmpInputs.push_back(*fcmpInput);
+        result.keyImages.push_back(fcmpInput->keyImage);
+        result.spentOutpoints.push_back(p.note.outpoint);
+    }
+
+    // Self-verify exactly what consensus will: the membership proofs and SA+L
+    // signatures through the audited verifier, the aggregated range proof, and
+    // value conservation against the pool delta.
+    //
+    // The delta is what the shell expresses transparently: the pool loses the fee
+    // and anything deshielded.
+    const CAmount poolDelta = -(fee + deshieldTotal);
+    if (!result.privacyTx.VerifyFcmpSelfCheck(poolDelta, m_curveTree->GetRoot(),
+                                              messageHash)) {
         result.error = "Transaction self-check failed";
         return result;
     }
 
-    // NOT YET BROADCASTABLE. Assembling the shell needs pool UTXO selection (the
-    // pool script is not wallet-owned, so its coins come from the chain's UTXO
-    // set, not from wallet coin selection), and the membership proofs are still
-    // produced by the scaffold prover, which cannot verify against a real tree
-    // root. See P-a/P-b/P-c in doc/design/fcmp-value-balance.md. Returning
-    // standardTx = nullptr is deliberate: the previous code called
-    // ToTransaction(), which emitted an input-less transaction and returned a
-    // txid for something that could never confirm.
-    result.standardTx = nullptr;
-    result.error = "FCMP spend path incomplete: pool input selection and a "
-                   "curve-tree-backed membership proof are not yet wired";
+    auto assembled = result.privacyTx.ToFcmpTransaction(shell);
+    if (!assembled) {
+        result.error = "Failed to assemble the FCMP transaction";
+        return result;
+    }
+
+    // The payload rides in the witness, which the txid excludes -- so attaching
+    // it must not have changed the hash the proofs commit to. If it did, every
+    // proof in this transaction is bound to a message consensus will not
+    // recompute, and it would be rejected for reasons pointing nowhere near here.
+    if (assembled->GetHash() != shellTxid) {
+        result.error = "Assembled transaction does not hash to what was signed";
+        return result;
+    }
+
+    // The fee was committed to before the transaction could be measured, so
+    // confirm the estimate actually covered it. Failing here is a bug in
+    // EstimateVirtualSize, and saying so is far more useful than letting the node
+    // reject the transaction with "min relay fee not met" once the proofs have
+    // already been generated and the change note recorded.
+    const size_t actualVsize = GetVirtualTransactionSize(*assembled);
+    const CAmount requiredFee = feeRate.GetFee(actualVsize);
+    if (fee < requiredFee) {
+        result.error = strprintf(
+            "Fee %s does not meet the %s required for %d vbytes; "
+            "raise the fee rate or pass a fixed fee",
+            FormatMoney(fee), FormatMoney(requiredFee), actualVsize);
+        return result;
+    }
+
+    // The change note's outpoint, now that the txid exists. Notes occupy the
+    // first vout slots in shell order, and change is the last of them.
+    //
+    // The caller used to compute this as privacyOutputs.size() - 1, which is a
+    // different sequence entirely -- it counts transparent outputs and excludes
+    // the pool output. It agreed only for the simplest shape, and pointed at the
+    // wrong output the moment a transaction deshielded anything.
+    if (result.changeOutputInfo) {
+        result.changeOutputInfo->outpoint =
+            COutPoint(Txid::FromUint256(shellTxid), static_cast<uint32_t>(notes.size() - 1));
+    }
+
+    result.standardTx = MakeTransactionRef(*assembled);
+    result.success = true;
     return result;
 }
 
@@ -360,16 +482,42 @@ CAmount CFcmpWalletManager::EstimateFee(
     size_t numOutputs,
     const CFeeRate& feeRate) const
 {
-    // FCMP proof is approximately:
-    // - Per input: ~2KB (membership proof + SA+L signature)
-    // - Per output: ~100 bytes (commitment + encrypted data)
-    // - Base overhead: ~100 bytes
+    return feeRate.GetFee(EstimateVirtualSize(numInputs, numOutputs));
+}
 
-    size_t estimatedSize = 100 +
-                          numInputs * 2048 +
-                          numOutputs * 100;
+size_t CFcmpWalletManager::EstimateVirtualSize(size_t numInputs, size_t numOutputs)
+{
+    // An FCMP spend is mostly witness: the payload -- membership proofs, range
+    // proof, commitments -- rides in vin[0]'s witness, which the txid excludes
+    // and which is discounted 4:1 when sizing.
+    //
+    // Split base from witness rather than sizing the whole thing at full weight.
+    // Charging witness bytes at 4x overestimated the fee severalfold; sizing a
+    // proof at 2KB when it is nearer 4.5KB underestimated it, and the transaction
+    // was then rejected for not meeting the relay minimum after the proofs had
+    // already been generated.
+    //
+    // A note output is an OP_RETURN of 133 bytes plus script and amount overhead;
+    // the pool output is a 34-byte witness program. Both are base bytes.
+    const size_t baseSize =
+        10 +                        // version, counts, locktime
+        numInputs * 41 +            // outpoint + empty scriptSig + sequence
+        (numOutputs + 1) * 145 +    // note OP_RETURNs, plus the pool output
+        43;
 
-    return feeRate.GetFee(estimatedSize);
+    // Per input: the FCMP++ proof (~4.4 KB for one layer) and its SA+L part.
+    // Per output: a 33-byte commitment and the surrounding serialisation.
+    // Plus one aggregated Bulletproofs+ range proof, which grows logarithmically
+    // in the number of outputs -- ~700 bytes covers the sizes reachable here.
+    const size_t witnessSize =
+        numInputs * 5120 +
+        (numOutputs + 1) * 128 +
+        768;
+
+    // Round up, and leave headroom: paying slightly over the minimum costs a few
+    // satoshis, while falling under it wastes several seconds of proving.
+    const size_t weight = baseSize * 4 + witnessSize;
+    return (weight + 3) / 4 + 64;
 }
 
 // ============================================================================
@@ -524,35 +672,19 @@ CFcmpShieldResult CFcmpWalletManager::CreateShieldTransaction(
     // Generate output tuple for curve tree
     ed25519::Scalar blinding = ed25519::Scalar::Random();
     std::optional<ed25519::Scalar> privKey;
-    curvetree::OutputTuple outputTuple = CreateOutputTuple(recipient, amount, blinding, privKey);
-
-    // Create the OP_RETURN script with FCMP output marker
-    // Format: OP_RETURN <FCMP_MARKER> <O:32> <I:32> <C:32>
-    CScript opReturnScript;
-    opReturnScript << OP_RETURN;
-
-    std::vector<uint8_t> fcmpData;
-    fcmpData.reserve(4 + 96); // marker + 3 points
-
-    // FCMP marker "FCMP"
-    fcmpData.push_back(0x46); // 'F'
-    fcmpData.push_back(0x43); // 'C'
-    fcmpData.push_back(0x4D); // 'M'
-    fcmpData.push_back(0x50); // 'P'
-
-    // Add O, I, C points
-    fcmpData.insert(fcmpData.end(), outputTuple.O.data.begin(), outputTuple.O.data.end());
-    fcmpData.insert(fcmpData.end(), outputTuple.I.data.begin(), outputTuple.I.data.end());
-    fcmpData.insert(fcmpData.end(), outputTuple.C.data.begin(), outputTuple.C.data.end());
-
-    opReturnScript << fcmpData;
+    CPubKey ephemeralPubKey;
+    CPubKey oneTimePubKey;
+    curvetree::OutputTuple outputTuple = CreateOutputTuple(
+        recipient, amount, blinding, privKey, ephemeralPubKey, oneTimePubKey,
+        BlindingPolicy::Zero);
 
     // Build the transaction
     CMutableTransaction mtx;
     mtx.version = 2;
 
     // Add OP_RETURN output (FCMP data)
-    mtx.vout.push_back(CTxOut(0, opReturnScript));
+    mtx.vout.push_back(CTxOut(0, BuildNoteScript(outputTuple, ephemeralPubKey,
+                                                 oneTimePubKey, amount)));
 
     // The wallet will add inputs and change output
     // For now, return a template that the wallet can complete
@@ -898,10 +1030,21 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
             // and use DeriveStealthSpendingKey directly. The OP_RETURN format
             // doesn't include view tags, so we verify ownership by checking that
             // the derived key produces the correct O point.
+            // Output index 0, matching what the sender used.
+            //
+            // This passed the note's VOUT index, while GenerateStealthDestination
+            // hashes with CStealthOutput::outputIndex, which is 0. They agreed
+            // only for a note that happened to land at vout 0, so notes paid to
+            // another wallet were simply never found.
+            //
+            // Zero is the right convention here rather than a bug to paper over:
+            // every note carries its own ephemeral R, so the shared secret is
+            // already unique per output and an index adds nothing. It exists in
+            // protocols where several outputs share one R.
             CKey derivedKey;
             bool deriveResult = privacy::DeriveStealthSpendingKey(
                 addrData.scanPrivKey, addrData.spendPrivKey,
-                ephemeralPubKey, i, derivedKey);
+                ephemeralPubKey, 0, derivedKey);
 
             if (!deriveResult || !derivedKey.IsValid()) {
                 continue;
@@ -923,7 +1066,6 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
                 // We own this output! Create FCMP output record
                 CFcmpOutputInfo outputInfo;
                 outputInfo.outpoint = COutPoint(Txid::FromUint256(txid), i);
-                outputInfo.amount = txout.nValue; // For shielding txs, amount is in the transparent input
                 outputInfo.outputTuple.O = O;
                 outputInfo.outputTuple.I = I;
                 outputInfo.outputTuple.C = C;
@@ -951,14 +1093,57 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
                 outputInfo.blinding = ed25519::Scalar::FromBytesModOrder(
                     std::vector<uint8_t>(blindingHash.begin(), blindingHash.end()));
 
+                // Recover the amount from the note's encrypted field.
+                //
+                // txout.nValue is ZERO here -- a note is an OP_RETURN and carries
+                // no value -- so reading the amount from it recorded every
+                // received note as worth nothing. The value is committed to in C
+                // and sent in the note under a mask only the recipient can derive.
+                //
+                // The recovered amount is CHECKED against the commitment rather
+                // than trusted: C == v*H + b*G holds only for the right v, so a
+                // wrong or corrupted field is rejected instead of producing a note
+                // the wallet believes in and can never spend.
+                if (data.size() >= 141) {
+                    uint64_t enc = 0;
+                    for (int b = 0; b < 8; ++b) {
+                        enc |= static_cast<uint64_t>(data[133 + b]) << (8 * b);
+                    }
+                    const CAmount recovered =
+                        static_cast<CAmount>(enc ^ AmountMask(oneTimePubKey));
+
+                    if (recovered < 0 || !MoneyRange(recovered)) {
+                        LogDebug(BCLog::PRIVACY, "FCMP scan: tx %s vout %d has an "
+                                 "out-of-range amount; skipping\n",
+                                 txid.ToString().substr(0, 8), i);
+                        break;
+                    }
+
+                    const ed25519::Point expectedC =
+                        ed25519::PedersenCommitment::CommitAmount(
+                            static_cast<uint64_t>(recovered),
+                            outputInfo.blinding).GetPoint();
+                    if (!(expectedC == C)) {
+                        LogDebug(BCLog::PRIVACY, "FCMP scan: tx %s vout %d amount does "
+                                 "not match its commitment; skipping\n",
+                                 txid.ToString().substr(0, 8), i);
+                        break;
+                    }
+                    outputInfo.amount = recovered;
+                } else {
+                    LogDebug(BCLog::PRIVACY, "FCMP scan: tx %s vout %d carries no "
+                             "encrypted amount; skipping\n",
+                             txid.ToString().substr(0, 8), i);
+                    break;
+                }
+
                 // Compute key image hash
                 auto keyImage = GenerateKeyImage(outputInfo.privKey, O);
                 outputInfo.keyImageHash = keyImage.GetHash();
 
-                // Assign tree leaf index
-                if (m_curveTree) {
-                    outputInfo.treeLeafIndex = m_curveTree->GetOutputCount();
-                }
+                // The leaf index is NOT recorded here: the tree has not grown to
+                // include this note yet when the wallet scans, so any value read
+                // now is wrong. It is looked up at spend time by ResolveLeafIndex.
 
                 // Add to tracked outputs
                 if (AddFcmpOutput(outputInfo)) {
@@ -1112,11 +1297,63 @@ int CFcmpWalletManager::GetCurrentHeight() const
     return m_wallet->GetLastBlockHeight();
 }
 
+CScript CFcmpWalletManager::BuildNoteScript(const curvetree::OutputTuple& tuple,
+                                            const CPubKey& ephemeralPubKey,
+                                            const CPubKey& oneTimePubKey,
+                                            CAmount amount)
+{
+    std::vector<uint8_t> fcmpData;
+    fcmpData.reserve(4 + 96 + 33 + 8);
+
+    // FCMP marker "FCMP"
+    fcmpData.push_back(0x46); // 'F'
+    fcmpData.push_back(0x43); // 'C'
+    fcmpData.push_back(0x4D); // 'M'
+    fcmpData.push_back(0x50); // 'P'
+
+    fcmpData.insert(fcmpData.end(), tuple.O.data.begin(), tuple.O.data.end());
+    fcmpData.insert(fcmpData.end(), tuple.I.data.begin(), tuple.I.data.end());
+    fcmpData.insert(fcmpData.end(), tuple.C.data.begin(), tuple.C.data.end());
+
+    // R, the DKSAP ephemeral pubkey, at offset 100 -- where the scanner looks.
+    // Without it the note is invisible to its recipient: ownership is decided by
+    // re-deriving the one-time key from R and comparing against O, and a scan
+    // that finds no valid R skips the output entirely. Notes were published
+    // without it, which is why nothing but a self-shield was ever detectable.
+    if (ephemeralPubKey.IsValid()) {
+        fcmpData.insert(fcmpData.end(), ephemeralPubKey.begin(), ephemeralPubKey.end());
+
+        // The encrypted amount, at offset 133.
+        //
+        // Without it a recipient can prove a note is theirs and recover its
+        // blinding, but not learn what it is worth: the value lives only inside
+        // the commitment, and recovering it from C would be a discrete log. The
+        // note would be detected and still unusable.
+        //
+        // Recovery is self-checking -- C == v*H + b*G only holds for the right v
+        // -- so a corrupted or foreign amount is detected rather than believed.
+        if (oneTimePubKey.IsValid()) {
+            const uint64_t enc =
+                static_cast<uint64_t>(amount) ^ AmountMask(oneTimePubKey);
+            for (int i = 0; i < 8; ++i) {
+                fcmpData.push_back(static_cast<uint8_t>((enc >> (8 * i)) & 0xFF));
+            }
+        }
+    }
+
+    CScript script;
+    script << OP_RETURN << fcmpData;
+    return script;
+}
+
 curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
     const privacy::CStealthAddress& stealthAddr,
     CAmount amount,
     ed25519::Scalar& blinding,
-    std::optional<ed25519::Scalar>& privKey) const
+    std::optional<ed25519::Scalar>& privKey,
+    CPubKey& ephemeralPubKey,
+    CPubKey& oneTimePubKey,
+    BlindingPolicy blindingPolicy) const
 {
     curvetree::OutputTuple tuple;
 
@@ -1126,7 +1363,18 @@ curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
 
     // Generate stealth destination using DKSAP protocol
     privacy::CStealthOutput stealthOut;
-    if (!privacy::GenerateStealthDestination(stealthAddr, ephemeralKey, stealthOut)) {
+    const bool haveStealthOut =
+        privacy::GenerateStealthDestination(stealthAddr, ephemeralKey, stealthOut);
+
+    // R comes from the stealth output, NOT from the key made above.
+    // GenerateStealthDestination draws its OWN ephemeral key and overwrites the
+    // one it is handed, so reading the pubkey before the call published an R that
+    // had nothing to do with the one-time key actually derived -- and the
+    // recipient, re-deriving from that R, could never match O.
+    ephemeralPubKey = stealthOut.ephemeral.ephemeralPubKey;
+    oneTimePubKey = stealthOut.oneTimePubKey;
+
+    if (!haveStealthOut) {
         // Fallback: use random key if stealth derivation fails
         LogPrintf("FCMP CreateOutputTuple: GenerateStealthDestination FAILED - using random key (output will NOT be spendable!)\n");
         auto kp = ed25519::KeyPair::Generate();
@@ -1170,23 +1418,54 @@ curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
     std::vector<uint8_t> toHash(tuple.O.data.begin(), tuple.O.data.end());
     tuple.I = ed25519::Point::HashToPoint(toHash);
 
-    // C = amount*H + blinding*G, with ZERO blinding.
-    //
-    // A shield has no shielded inputs, so the ledger invariant reduces to
-    // delta*H == sum(note commitments). delta*H carries no blinding, so the note
-    // cannot carry one either or the two sides can never be equal and consensus
-    // rejects every shield as fcmp-shield-imbalance.
-    //
-    // The cost is that the shielded AMOUNT stays visible in the tree. That
-    // amount is already public from the transparent input funding the shield,
-    // so nothing is revealed that was not -- but the note remains linkable to it
-    // permanently. Hiding shield amounts needs a binding signature proving
-    // knowledge of the blinding sum; see doc/design/fcmp-value-balance.md.
-    //
-    // The note becomes unlinkable when it is SPENT: the pseudo-output is
-    // C~ = C + r_c*G with r_c from the prover, and the membership proof hides
-    // which leaf it came from.
-    blinding = ed25519::Scalar::Zero();
+    // C = amount*H + blinding*G. Which blinding depends on what this note is for.
+    switch (blindingPolicy) {
+    case BlindingPolicy::Zero:
+        // A shield has no shielded inputs, so the ledger invariant reduces to
+        // delta*H == sum(note commitments). delta*H carries no blinding, so the
+        // note cannot carry one either or the two sides can never be equal and
+        // consensus rejects every shield as fcmp-shield-imbalance.
+        //
+        // The cost is that the shielded AMOUNT stays visible in the tree. That
+        // amount is already public from the transparent input funding the
+        // shield, so nothing is revealed that was not -- but the note remains
+        // linkable to it permanently. Hiding shield amounts needs a binding
+        // signature proving knowledge of the blinding sum; see
+        // doc/design/fcmp-value-balance.md.
+        //
+        // The note becomes unlinkable when it is SPENT: the pseudo-output is
+        // C~ = C + r_c*G with r_c from the prover, and the membership proof
+        // hides which leaf it came from.
+        blinding = ed25519::Scalar::Zero();
+        break;
+
+    case BlindingPolicy::DerivedFromOneTimeKey: {
+        // The recipient cannot spend a note whose blinding they cannot recover,
+        // and the note format has no encrypted-amount field to send it in. So it
+        // is derived from the one-time public key, which the recipient
+        // reconstructs during scanning -- the same derivation, byte for byte, as
+        // ScanTransactionForFcmpOutputs. Any divergence here makes every note we
+        // pay out unspendable by its owner.
+        if (!stealthOut.oneTimePubKey.IsValid()) {
+            LogPrintf("FCMP CreateOutputTuple: no one-time key to derive a blinding "
+                      "from -- output will NOT be spendable\n");
+            blinding = ed25519::Scalar::Zero();
+            break;
+        }
+        std::vector<uint8_t> blindingInput(stealthOut.oneTimePubKey.begin(),
+                                           stealthOut.oneTimePubKey.end());
+        blindingInput.push_back(0x42); // domain separator for blinding derivation
+        const uint256 blindingHash = Hash(blindingInput);
+        blinding = ed25519::Scalar::FromBytesModOrder(
+            std::vector<uint8_t>(blindingHash.begin(), blindingHash.end()));
+        break;
+    }
+
+    case BlindingPolicy::Explicit:
+        // Caller's blinding, used as given.
+        break;
+    }
+
     auto commitment = ed25519::PedersenCommitment::CommitAmount(
         static_cast<uint64_t>(amount),
         blinding
@@ -1228,10 +1507,28 @@ bool CFcmpWalletManager::SelectInputs(
     return false;
 }
 
+std::optional<uint64_t> CFcmpWalletManager::ResolveLeafIndexPublic(
+    const CFcmpOutputInfo& output) const
+{
+    LOCK(cs_fcmp);
+    return ResolveLeafIndex(output);
+}
+
+std::optional<uint64_t> CFcmpWalletManager::ResolveLeafIndex(
+    const CFcmpOutputInfo& output) const
+{
+    AssertLockHeld(cs_fcmp);
+
+    if (!m_curveTree) {
+        return std::nullopt;
+    }
+    return m_curveTree->FindOutputIndex(output.outputTuple);
+}
+
 std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
     const CFcmpOutputInfo& output,
-    const uint256& messageHash,
-    ed25519::Scalar& c_blind_out)
+    const privacy::fcmp::FcmpProver::Rerandomization& rerandomized,
+    const uint256& messageHash)
 {
     AssertLockHeld(cs_fcmp);
 
@@ -1256,24 +1553,19 @@ std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
     //     copy of a public tree leaf, which identified exactly which note was
     //     being spent and defeated the membership proof's entire purpose.
     //
-    // The real prover draws its own blinds, binds C~ to the leaf it came from,
-    // and produces the SA+L signature inside the proof.
+    // The real prover binds C~ to the leaf it came from and produces the SA+L
+    // signature inside the proof.
     //
     // The wallet's spend key is x with O = x*G and no T component, so y = 0.
     const ed25519::Scalar y = ed25519::Scalar::Zero();
 
     std::array<uint8_t, 32> key_image{};
-    std::array<uint8_t, 32> c_tilde{};
-    std::array<uint8_t, 32> c_blind{};
 
     try {
         privacy::fcmp::FcmpContext ctx;
         privacy::fcmp::FcmpProver prover(m_curveTree);
         auto proofBytes = prover.GenerateFullProof(
-            output.treeLeafIndex,
-            output.privKey, y,
-            messageHash,
-            key_image, c_tilde, c_blind);
+            rerandomized, output.privKey, y, messageHash, key_image);
 
         fcmpInput.membershipProof = privacy::CFcmpProof(
             std::move(proofBytes),
@@ -1288,22 +1580,17 @@ std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
     // slip through.
     std::memcpy(fcmpInput.keyImage.data.data(), key_image.data(), 32);
 
-    // The pseudo-output IS the prover's C~. Carrying it in both places keeps the
-    // struct self-consistent: verification passes pseudoOutput to
-    // fcmp_verify_full, and nothing may disagree with the proof.
+    // The pseudo-output IS the C~ this input was re-randomised to, and the same
+    // one the caller balanced its output commitments against. Anything else here
+    // would be a value the proof does not speak about.
     fcmpInput.pseudoOutput.data.assign(33, 0);
     fcmpInput.pseudoOutput.data[0] = 0x0E;  // ed25519 curve tag
-    std::memcpy(fcmpInput.pseudoOutput.data.data() + 1, c_tilde.data(), 32);
-    std::memcpy(fcmpInput.inputTuple.C_tilde.data.data(), c_tilde.data(), 32);
+    std::memcpy(fcmpInput.pseudoOutput.data.data() + 1, rerandomized.c_tilde.data(), 32);
+    std::memcpy(fcmpInput.inputTuple.C_tilde.data.data(), rerandomized.c_tilde.data(), 32);
 
     // O~, I~, R and the SA+L signature live INSIDE the proof and are read from
     // it by fcmp_verify_full. Leaving hand-computed copies here would let them
     // drift from what was actually proven, so they stay unset.
-
-    // Hand r_c back: the pseudo-output's blinding is b~ = b + r_c, and balancing
-    // the outputs against b instead of b~ produces a transaction that cannot
-    // balance, with nothing to indicate why.
-    c_blind_out = ed25519::Scalar::FromBytesModOrder(c_blind.data(), 32);
 
     return fcmpInput;
 }

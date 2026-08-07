@@ -288,6 +288,15 @@ public:
     // Check if an output exists at the given index
     bool HasOutput(uint64_t index) const;
 
+    // Find the leaf index holding this output tuple, if the tree has it.
+    //
+    // A spender must prove membership of the leaf its note actually occupies.
+    // That index cannot be predicted when the note is created -- the note only
+    // enters the tree when its block connects, behind however many notes other
+    // wallets published in the meantime -- so it has to be looked up here rather
+    // than guessed from the output count at creation or scan time.
+    std::optional<uint64_t> FindOutputIndex(const OutputTuple& output) const;
+
     // Remove the last N outputs from the tree (for reorg handling)
     // Returns true on success
     bool RemoveLastN(uint64_t count);

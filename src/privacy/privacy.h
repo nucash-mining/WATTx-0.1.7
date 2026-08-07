@@ -232,6 +232,16 @@ public:
     std::optional<CTransaction> ToFcmpTransaction(const CFcmpShell& shell) const;
 
     /**
+     * @brief The txid the shell will have, before any payload exists.
+     *
+     * A spender must sign the hash consensus will recompute, but the payload it
+     * signs cannot be built until that hash is known. Witness data is excluded
+     * from the txid, so the shell alone determines it and this can be computed
+     * first. ToFcmpTransaction(shell) is guaranteed to hash to the same value.
+     */
+    uint256 ShellTxid(const CFcmpShell& shell) const;
+
+    /**
      * @brief Parse from standard transaction
      */
     static std::optional<CPrivacyTransaction> FromTransaction(const CTransaction& tx);
@@ -254,16 +264,23 @@ public:
     /**
      * @brief Self-check for wallet-created FCMP transactions.
      *
-     * Verifies the SA+L signatures, the aggregated range proof, and value
-     * conservation against @p poolDelta. The membership proof is deferred to
-     * consensus (it needs the chain's tree root).
+     * Runs the same checks consensus will: every input through the audited
+     * verifier (membership proof AND SA+L signature AND the pseudo-output's
+     * binding to its leaf), the aggregated range proof, and value conservation
+     * against @p poolDelta.
      *
      * @param poolDelta Net value the shielded pool gains, as the shell will
      *                  express it transparently. The caller must pass the SAME
      *                  delta the assembled transaction produces, or the wallet
      *                  will broadcast something consensus rejects.
+     * @param treeRoot  The curve-tree root the proofs were built against.
+     * @param messageHash The message the proofs commit to. Must be what
+     *                  consensus recomputes -- Hash(tx.GetHash()) -- or the
+     *                  transaction verifies here and nowhere else.
      */
-    bool VerifyFcmpSelfCheck(CAmount poolDelta) const;
+    bool VerifyFcmpSelfCheck(CAmount poolDelta,
+                             const curvetree::TreeHash& treeRoot,
+                             const uint256& messageHash) const;
 
     template <typename Stream>
     void Serialize(Stream& s) const {

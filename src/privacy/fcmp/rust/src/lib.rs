@@ -884,6 +884,123 @@ pub unsafe extern "C" fn fcmp_verify(
 // Full FCMP++ Proof Generation (Real Implementation)
 // ============================================================================
 
+/// Parse `num_leaves` × 96 bytes of `O‖I‖C` into the leaf branch's outputs.
+unsafe fn parse_leaf_branch(
+    leaves_data: *const u8,
+    num_leaves: usize,
+) -> Result<Vec<monero_fcmp_plus_plus::Output>, i32> {
+    use monero_fcmp_plus_plus::Output as MoneroOutput;
+    use ciphersuite::group::GroupEncoding;
+    use dalek_ff_group::EdwardsPoint as DfgPoint;
+
+    let all_leaf_bytes = slice::from_raw_parts(leaves_data, num_leaves * 96);
+    let mut all_outputs: Vec<MoneroOutput> = Vec::with_capacity(num_leaves);
+    for i in 0..num_leaves {
+        let base = i * 96;
+        let mut o_arr = [0u8; 32];
+        let mut ii_arr = [0u8; 32];
+        let mut c_arr = [0u8; 32];
+        o_arr.copy_from_slice(&all_leaf_bytes[base..base + 32]);
+        ii_arr.copy_from_slice(&all_leaf_bytes[base + 32..base + 64]);
+        c_arr.copy_from_slice(&all_leaf_bytes[base + 64..base + 96]);
+
+        let O: DfgPoint = match Option::from(DfgPoint::from_bytes(&o_arr)) {
+            Some(p) => p,
+            None => return Err(FCMP_ERROR_INVALID_POINT),
+        };
+        let I: DfgPoint = match Option::from(DfgPoint::from_bytes(&ii_arr)) {
+            Some(p) => p,
+            None => return Err(FCMP_ERROR_INVALID_POINT),
+        };
+        let C: DfgPoint = match Option::from(DfgPoint::from_bytes(&c_arr)) {
+            Some(p) => p,
+            None => return Err(FCMP_ERROR_INVALID_POINT),
+        };
+
+        match MoneroOutput::new(O, I, C) {
+            Ok(out) => all_outputs.push(out),
+            Err(_) => return Err(FCMP_ERROR_INVALID_POINT),
+        }
+    }
+    Ok(all_outputs)
+}
+
+/// Re-randomize the output being spent, WITHOUT yet proving anything about it.
+///
+/// This is the first half of a spend. It exists because proving needs the signable
+/// transaction hash, and the transaction cannot be built until its output
+/// commitments are known -- and those depend on `r_c`, which re-randomization
+/// draws. Doing both in one call is therefore circular: `r_c` would only become
+/// available after the message it had to be committed under was already fixed.
+///
+/// So: re-randomize first, learn `C~` and `r_c`, balance and assemble the
+/// transaction, and then call `fcmp_prove_full` with the saved re-randomization
+/// and the resulting hash. `RerandomizedOutput::write` is provided by the fcmp++
+/// crate for exactly this ("saving a re-randomization to prove for the output's
+/// membership later").
+///
+/// `rerand_out` receives the serialized re-randomization, to be handed back to
+/// `fcmp_prove_full` unchanged. It holds `r_o`, `r_i`, `r_r_i` and `r_c`:
+/// **SECRET**, and enough to link the spend to its tree leaf. 256 bytes is ample.
+///
+/// `c_blind_out` receives `+r_c` (not the negated form the proof consumes), since
+/// `C~ = C + r_c·G` means the pseudo-out's blinding is `b~ = b + r_c`.
+///
+/// # Safety
+/// All pointers must be valid for the described lengths.
+#[no_mangle]
+pub unsafe extern "C" fn fcmp_rerandomize(
+    leaves_data: *const u8,   // num_leaves * 96 bytes
+    num_leaves: usize,
+    our_leaf_index: usize,
+    rerand_out: *mut u8,
+    rerand_max_len: usize,
+    rerand_len_out: *mut usize,
+    c_tilde_out: *mut u8,     // 32 bytes output (pseudo-out)
+    c_blind_out: *mut u8,     // 32 bytes output (r_c, SECRET - never publish)
+) -> i32 {
+    use monero_fcmp_plus_plus::sal::RerandomizedOutput;
+    use ciphersuite::group::{GroupEncoding, ff::PrimeField};
+
+    if leaves_data.is_null() || rerand_out.is_null() || rerand_len_out.is_null() ||
+       c_tilde_out.is_null() || c_blind_out.is_null() {
+        return FCMP_ERROR_INVALID_PARAM;
+    }
+    if num_leaves == 0 || our_leaf_index >= num_leaves {
+        return FCMP_ERROR_INVALID_PARAM;
+    }
+
+    let all_outputs = match parse_leaf_branch(leaves_data, num_leaves) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
+
+    let rerandomized = RerandomizedOutput::new(&mut OsRng, all_outputs[our_leaf_index]);
+
+    let mut buf: Vec<u8> = Vec::new();
+    if rerandomized.write(&mut buf).is_err() {
+        return FCMP_ERROR_PROOF_GENERATION;
+    }
+    if buf.len() > rerand_max_len {
+        return FCMP_ERROR_MEMORY;
+    }
+    ptr::copy_nonoverlapping(buf.as_ptr(), rerand_out, buf.len());
+    *rerand_len_out = buf.len();
+
+    let ct = rerandomized.input().C_tilde().to_bytes();
+    ptr::copy_nonoverlapping(ct.as_ptr(), c_tilde_out, 32);
+
+    // `+r_c`, not `c_blind()`: that accessor returns `-r_c`, the additive inverse
+    // the FCMP proof consumes. A spender balancing blindings needs `+r_c` to form
+    // `b~ = b + r_c`; handing back the negated form produces transactions that
+    // fail the balance check for no visible reason.
+    let r_c = -rerandomized.c_blind();
+    let rc_bytes = r_c.to_repr();
+    ptr::copy_nonoverlapping(rc_bytes.as_ptr(), c_blind_out, 32);
+
+    FCMP_SUCCESS
+}
+
 /// Generate a real FCMP++ membership proof for a leaf-level tree (1 layer: leaves → root).
 ///
 /// The caller provides all outputs in the leaf branch (`leaves_data`, `num_leaves` × 96 bytes,
@@ -892,15 +1009,17 @@ pub unsafe extern "C" fn fcmp_verify(
 /// `O = x·G + y·T`, and the 32-byte `signable_tx_hash`.
 ///
 /// On success the serialised `FcmpPlusPlus` proof is written to `proof_out`, its length to
-/// `*proof_len_out`, the key image `L = x·I` to `key_image_out`, the pseudo-out `C~` to
-/// `c_tilde_out`, and the commitment re-randomiser `r_c` to `c_blind_out`.  All three 32-byte
-/// output buffers must be provided by the caller.
+/// `*proof_len_out`, and the key image `L = x·I` to `key_image_out`.
 ///
-/// `r_c` is required by the caller, not merely informative: the re-randomisation is
-/// `C~ = C + r_c·G`, so the blinding of the pseudo-out is `b~ = b + r_c`, and a spender cannot
-/// balance a transaction's output blindings against its inputs without it.  The blinds are drawn
-/// inside `RerandomizedOutput::new` from the OS RNG, so this is the only way out.  Treat it as
-/// secret: publishing `r_c` alongside `C~` would re-link the input to its tree leaf.
+/// `rerand_data` is the re-randomization saved by `fcmp_rerandomize`, which must be called first.
+/// The two are split because proving commits to `signable_tx_hash`, but the transaction being
+/// hashed cannot be assembled until its output commitments are known, and those depend on the
+/// `r_c` that re-randomization draws.  Drawing the blinds here as well would make that circular.
+/// `C~` and `r_c` therefore come from `fcmp_rerandomize`; this function does not return them.
+///
+/// `leaves_data`, `num_leaves` and `our_leaf_index` must describe the SAME leaf and branch that
+/// were re-randomized, or the SAL proof and the membership proof will be about different outputs
+/// and verification fails.
 ///
 /// # Safety
 /// All pointers must be valid for the described lengths.
@@ -915,12 +1034,12 @@ pub unsafe extern "C" fn fcmp_prove_full(
     x_bytes: *const u8,       // 32 bytes: spend key x
     y_bytes: *const u8,       // 32 bytes: spend key y
     tx_hash: *const u8,       // 32 bytes: signable tx hash
+    rerand_data: *const u8,   // serialized RerandomizedOutput from fcmp_rerandomize
+    rerand_len: usize,
     key_image_out: *mut u8,   // 32 bytes output
-    c_tilde_out: *mut u8,     // 32 bytes output (pseudo-out)
-    c_blind_out: *mut u8,     // 32 bytes output (r_c, SECRET - never publish)
 ) -> i32 {
     use monero_fcmp_plus_plus::{
-        FCMP_PARAMS, Output as MoneroOutput, Curves, FcmpPlusPlus,
+        FCMP_PARAMS, Curves, FcmpPlusPlus,
         fcmps::{Fcmp, Path, Branches, OBlind, IBlind, IBlindBlind, CBlind, OutputBlinds},
         sal::{RerandomizedOutput, OpenedInputTuple, SpendAuthAndLinkability},
     };
@@ -934,10 +1053,10 @@ pub unsafe extern "C" fn fcmp_prove_full(
 
     if proof_out.is_null() || proof_len_out.is_null() || leaves_data.is_null() ||
        x_bytes.is_null() || y_bytes.is_null() || tx_hash.is_null() ||
-       key_image_out.is_null() || c_tilde_out.is_null() || c_blind_out.is_null() {
+       rerand_data.is_null() || key_image_out.is_null() {
         return FCMP_ERROR_INVALID_PARAM;
     }
-    if num_leaves == 0 || our_leaf_index >= num_leaves {
+    if num_leaves == 0 || our_leaf_index >= num_leaves || rerand_len == 0 {
         return FCMP_ERROR_INVALID_PARAM;
     }
 
@@ -963,40 +1082,22 @@ pub unsafe extern "C" fn fcmp_prove_full(
     tx_hash_arr.copy_from_slice(slice::from_raw_parts(tx_hash, 32));
 
     // Parse leaf outputs (each output is 3 × 32-byte compressed Ed25519 points: O, I, C).
-    let all_leaf_bytes = slice::from_raw_parts(leaves_data, num_leaves * 96);
-    let mut all_outputs: Vec<MoneroOutput> = Vec::with_capacity(num_leaves);
-    for i in 0..num_leaves {
-        let base = i * 96;
-        let mut o_arr = [0u8; 32];
-        let mut ii_arr = [0u8; 32];
-        let mut c_arr = [0u8; 32];
-        o_arr.copy_from_slice(&all_leaf_bytes[base..base + 32]);
-        ii_arr.copy_from_slice(&all_leaf_bytes[base + 32..base + 64]);
-        c_arr.copy_from_slice(&all_leaf_bytes[base + 64..base + 96]);
-
-        let O: DfgPoint = match Option::from(DfgPoint::from_bytes(&o_arr)) {
-            Some(p) => p,
-            None => return FCMP_ERROR_INVALID_POINT,
-        };
-        let I: DfgPoint = match Option::from(DfgPoint::from_bytes(&ii_arr)) {
-            Some(p) => p,
-            None => return FCMP_ERROR_INVALID_POINT,
-        };
-        let C: DfgPoint = match Option::from(DfgPoint::from_bytes(&c_arr)) {
-            Some(p) => p,
-            None => return FCMP_ERROR_INVALID_POINT,
-        };
-
-        match MoneroOutput::new(O, I, C) {
-            Ok(out) => all_outputs.push(out),
-            Err(_) => return FCMP_ERROR_INVALID_POINT,
-        }
-    }
+    let all_outputs = match parse_leaf_branch(leaves_data, num_leaves) {
+        Ok(o) => o,
+        Err(e) => return e,
+    };
 
     let our_output = all_outputs[our_leaf_index];
 
-    // Re-randomise: generates the four blinds (r_o, r_i, r_r_i, r_c) internally.
-    let rerandomized = RerandomizedOutput::new(&mut OsRng, our_output);
+    // Restore the re-randomization drawn by fcmp_rerandomize, rather than drawing
+    // a fresh one. A new one here would carry a different r_c than the one the
+    // caller balanced its output commitments against, so the transaction would
+    // fail the balance check with nothing to indicate why.
+    let mut rerand_reader = slice::from_raw_parts(rerand_data, rerand_len);
+    let rerandomized = match RerandomizedOutput::read(&mut rerand_reader) {
+        Ok(r) => r,
+        Err(_) => return FCMP_ERROR_INVALID_PARAM,
+    };
 
     // Open the input tuple proving we know the spending key.
     let opening = match OpenedInputTuple::open(rerandomized.clone(), &x, &y) {
@@ -1069,22 +1170,10 @@ pub unsafe extern "C" fn fcmp_prove_full(
     ptr::copy_nonoverlapping(buf.as_ptr(), proof_out, buf.len());
     *proof_len_out = buf.len();
 
-    // Write key image and pseudo-out.
+    // Write the key image. C~ and r_c came from fcmp_rerandomize; the caller
+    // already holds them and needed them before this call could be made.
     let ki = key_image.to_bytes();
     ptr::copy_nonoverlapping(ki.as_ptr(), key_image_out, 32);
-    let ct = monero_input.C_tilde().to_bytes();
-    ptr::copy_nonoverlapping(ct.as_ptr(), c_tilde_out, 32);
-
-    // Write r_c, the commitment re-randomiser.
-    //
-    // NOT `c_blind()`: that accessor returns `-r_c`, the additive inverse the FCMP
-    // proof consumes (see RerandomizedOutput::c_blind in the fcmp++ crate). The
-    // re-randomisation itself is `C~ = C + r_c·G`, so a spender balancing blindings
-    // needs `+r_c` to form `b~ = b + r_c`. Handing back the negated form here would
-    // produce transactions that fail the balance check for no visible reason.
-    let r_c = -rerandomized.c_blind();
-    let rc_bytes = r_c.to_repr();
-    ptr::copy_nonoverlapping(rc_bytes.as_ptr(), c_blind_out, 32);
 
     FCMP_SUCCESS
 }
@@ -1640,13 +1729,22 @@ mod tests {
             let mut proof = vec![0u8; 64 * 1024];
             let mut proof_len = 0usize;
             let (mut ki, mut ct, mut cb) = ([0u8; 32], [0u8; 32], [0u8; 32]);
+            let mut rerand = [0u8; 256];
+            let mut rerand_len = 0usize;
+
+            assert_eq!(
+                fcmp_rerandomize(leaf.as_ptr(), 1, 0,
+                                 rerand.as_mut_ptr(), rerand.len(), &mut rerand_len,
+                                 ct.as_mut_ptr(), cb.as_mut_ptr()),
+                FCMP_SUCCESS);
 
             let rc = fcmp_prove_full(
                 proof.as_mut_ptr(), &mut proof_len, proof.len(),
                 leaf.as_ptr(), 1, 0,
                 x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
                 tx_hash.as_ptr(),
-                ki.as_mut_ptr(), ct.as_mut_ptr(), cb.as_mut_ptr());
+                rerand.as_ptr(), rerand_len,
+                ki.as_mut_ptr());
             assert_eq!(rc, FCMP_SUCCESS,
                        "prover cannot open an output with y = 0 -- the wallet's notes \
                         would all be unspendable");
@@ -1786,12 +1884,23 @@ mod tests {
             let mut c_tilde = [0u8; 32];
             let mut c_blind = [0u8; 32];
 
+            let mut rerand = [0u8; 256];
+            let mut rerand_len = 0usize;
+
+            assert_eq!(
+                fcmp_rerandomize(leaf.as_ptr(), 1, 0,
+                                 rerand.as_mut_ptr(), rerand.len(), &mut rerand_len,
+                                 c_tilde.as_mut_ptr(), c_blind.as_mut_ptr()),
+                FCMP_SUCCESS,
+                "rerandomize failed");
+
             let rc = fcmp_prove_full(
                 proof.as_mut_ptr(), &mut proof_len, proof.len(),
                 leaf.as_ptr(), 1, 0,
                 x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
                 tx_hash.as_ptr(),
-                key_image.as_mut_ptr(), c_tilde.as_mut_ptr(), c_blind.as_mut_ptr(),
+                rerand.as_ptr(), rerand_len,
+                key_image.as_mut_ptr(),
             );
             assert_eq!(rc, FCMP_SUCCESS, "prove_full failed");
 
@@ -1806,14 +1915,108 @@ mod tests {
             );
 
             // A null c_blind_out must be refused, not silently skipped.
-            let rc_null = fcmp_prove_full(
+            let rc_null = fcmp_rerandomize(
+                leaf.as_ptr(), 1, 0,
+                rerand.as_mut_ptr(), rerand.len(), &mut rerand_len,
+                c_tilde.as_mut_ptr(), ptr::null_mut(),
+            );
+            assert_eq!(rc_null, FCMP_ERROR_INVALID_PARAM);
+
+            // And proving without a re-randomization must be refused rather than
+            // silently drawing a fresh one the caller never balanced against.
+            let rc_no_rerand = fcmp_prove_full(
                 proof.as_mut_ptr(), &mut proof_len, proof.len(),
                 leaf.as_ptr(), 1, 0,
                 x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
                 tx_hash.as_ptr(),
-                key_image.as_mut_ptr(), c_tilde.as_mut_ptr(), ptr::null_mut(),
+                rerand.as_ptr(), 0,
+                key_image.as_mut_ptr(),
             );
-            assert_eq!(rc_null, FCMP_ERROR_INVALID_PARAM);
+            assert_eq!(rc_no_rerand, FCMP_ERROR_INVALID_PARAM);
+
+            fcmp_cleanup();
+        }
+    }
+
+    /// A proof must be bound to the re-randomization it was built from.
+    ///
+    /// The whole reason re-randomizing and proving are split is that the caller
+    /// balances its output commitments against the r_c from the first half. If a
+    /// proof built on a DIFFERENT re-randomization still verified against the
+    /// first half's C~, that balancing would be meaningless -- the published
+    /// pseudo-out and the proven one could disagree.
+    #[test]
+    fn test_proof_is_bound_to_its_rerandomization() {
+        use dalek_ff_group::{EdwardsPoint as DfgPoint, Scalar as DfgScalar};
+        use ciphersuite::group::{ff::Field, Group, GroupEncoding};
+        use monero_generators::T as MoneroT;
+        use rand_core::OsRng;
+
+        unsafe {
+            assert_eq!(fcmp_init(), FCMP_SUCCESS);
+
+            let x = DfgScalar::random(&mut OsRng);
+            let y = DfgScalar::random(&mut OsRng);
+            let o_pt = (DfgPoint::generator() * x) + (DfgPoint(MoneroT()) * y);
+            let i_pt = DfgPoint::random(&mut OsRng);
+            let c_pt = DfgPoint::random(&mut OsRng);
+
+            let mut leaf = [0u8; 96];
+            leaf[..32].copy_from_slice(&o_pt.to_bytes());
+            leaf[32..64].copy_from_slice(&i_pt.to_bytes());
+            leaf[64..].copy_from_slice(&c_pt.to_bytes());
+
+            let tx_hash = [0x2Bu8; 32];
+            let mut root = [0u8; 32];
+            assert_eq!(fcmp_compute_leaf_root(root.as_mut_ptr(), leaf.as_ptr(), 1),
+                       FCMP_SUCCESS);
+
+            // Two independent re-randomizations of the same leaf.
+            let mut rerand_a = [0u8; 256];
+            let mut len_a = 0usize;
+            let (mut ct_a, mut cb_a) = ([0u8; 32], [0u8; 32]);
+            assert_eq!(
+                fcmp_rerandomize(leaf.as_ptr(), 1, 0,
+                                 rerand_a.as_mut_ptr(), rerand_a.len(), &mut len_a,
+                                 ct_a.as_mut_ptr(), cb_a.as_mut_ptr()),
+                FCMP_SUCCESS);
+
+            let mut rerand_b = [0u8; 256];
+            let mut len_b = 0usize;
+            let (mut ct_b, mut cb_b) = ([0u8; 32], [0u8; 32]);
+            assert_eq!(
+                fcmp_rerandomize(leaf.as_ptr(), 1, 0,
+                                 rerand_b.as_mut_ptr(), rerand_b.len(), &mut len_b,
+                                 ct_b.as_mut_ptr(), cb_b.as_mut_ptr()),
+                FCMP_SUCCESS);
+
+            assert_ne!(ct_a, ct_b, "two re-randomizations produced the same C~");
+
+            // Prove using B, then try to pass it off as A.
+            let mut proof = vec![0u8; 64 * 1024];
+            let mut proof_len = 0usize;
+            let mut key_image = [0u8; 32];
+            assert_eq!(
+                fcmp_prove_full(
+                    proof.as_mut_ptr(), &mut proof_len, proof.len(),
+                    leaf.as_ptr(), 1, 0,
+                    x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
+                    tx_hash.as_ptr(),
+                    rerand_b.as_ptr(), len_b,
+                    key_image.as_mut_ptr()),
+                FCMP_SUCCESS);
+
+            assert_eq!(
+                fcmp_verify_full(root.as_ptr(), 1, proof.as_ptr(), proof_len,
+                                 key_image.as_ptr(), ct_b.as_ptr(), tx_hash.as_ptr()),
+                FCMP_SUCCESS,
+                "proof does not verify against its own C~");
+
+            assert_ne!(
+                fcmp_verify_full(root.as_ptr(), 1, proof.as_ptr(), proof_len,
+                                 key_image.as_ptr(), ct_a.as_ptr(), tx_hash.as_ptr()),
+                FCMP_SUCCESS,
+                "a proof verified against a C~ it was not built from");
 
             fcmp_cleanup();
         }
@@ -1849,13 +2052,23 @@ mod tests {
             let mut c_tilde = [0u8; 32];
             let mut c_blind = [0u8; 32];
 
+            let mut rerand = [0u8; 256];
+            let mut rerand_len = 0usize;
+            assert_eq!(
+                fcmp_rerandomize(leaf.as_ptr(), 1, 0,
+                                 rerand.as_mut_ptr(), rerand.len(), &mut rerand_len,
+                                 c_tilde.as_mut_ptr(), c_blind.as_mut_ptr()),
+                FCMP_SUCCESS
+            );
+
             assert_eq!(
                 fcmp_prove_full(
                     proof.as_mut_ptr(), &mut proof_len, proof.len(),
                     leaf.as_ptr(), 1, 0,
                     x.to_bytes().as_ptr(), y.to_bytes().as_ptr(),
                     tx_hash.as_ptr(),
-                    key_image.as_mut_ptr(), c_tilde.as_mut_ptr(), c_blind.as_mut_ptr(),
+                    rerand.as_ptr(), rerand_len,
+                    key_image.as_mut_ptr(),
                 ),
                 FCMP_SUCCESS
             );

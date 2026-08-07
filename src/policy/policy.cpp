@@ -12,6 +12,7 @@
 #include <consensus/consensus.h>
 #include <consensus/validation.h>
 #include <policy/feerate.h>
+#include <privacy/fcmp_pool_script.h>
 #include <primitives/transaction.h>
 #include <script/interpreter.h>
 #include <script/script.h>
@@ -137,9 +138,30 @@ bool IsStandardTx(const CTransaction& tx, const std::optional<unsigned>& max_dat
         }
     }
 
+    // A transaction paying into the shielded pool publishes one FCMP note per
+    // shielded output, each an OP_RETURN. Those notes are how outputs enter the
+    // curve tree, so the "only one OP_RETURN" rule below has to make room for
+    // them or no shielded transaction with change is ever relayable.
+    //
+    // Scoped to transactions that create a pool output, so this is not a general
+    // data-carrier exemption: a note only reaches the tree if pool value backs it
+    // (ConnectBlock drops unbacked notes), and its commitment is pinned by the
+    // balance check rather than freely chosen.
+    bool creates_pool = false;
+    for (const CTxOut& txout : tx.vout) {
+        if (privacy::IsPoolScript(txout.scriptPubKey)) {
+            creates_pool = true;
+            break;
+        }
+    }
+
     unsigned int nDataOut = 0;
     TxoutType whichType;
     for (const CTxOut& txout : tx.vout) {
+        if (creates_pool && privacy::IsFcmpNoteScript(txout.scriptPubKey)) {
+            continue;
+        }
+
         if (!::IsStandard(txout.scriptPubKey, max_datacarrier_bytes, whichType)) {
             reason = "scriptpubkey";
             return false;
@@ -230,6 +252,16 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
     for (unsigned int i = 0; i < tx.vin.size(); i++) {
         const CTxOut& prev = mapInputs.AccessCoin(tx.vin[i].prevout).out;
 
+        // The shielded pool lives at a reserved witness version, so that
+        // pre-activation nodes see it as anyone-can-spend and this deploys as a
+        // softfork. That makes it WITNESS_UNKNOWN here, and rejecting it would
+        // mean no shielded spend could ever be relayed. It is safe to allow
+        // because Rule P1 -- consensus-enforced -- requires a valid FCMP payload
+        // to move pool coins; the script is not what protects them.
+        if (privacy::IsPoolScript(prev.scriptPubKey)) {
+            continue;
+        }
+
         std::vector<std::vector<unsigned char> > vSolutions;
         TxoutType whichType = Solver(prev.scriptPubKey, vSolutions);
         if (whichType == TxoutType::NONSTANDARD || whichType == TxoutType::WITNESS_UNKNOWN) {
@@ -253,6 +285,29 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)
     }
 
     return true;
+}
+
+unsigned int PolicyScriptVerifyFlags(const CTransaction& tx, const CCoinsViewCache& mapInputs)
+{
+    unsigned int flags = STANDARD_SCRIPT_VERIFY_FLAGS;
+
+    if (tx.IsCoinBase()) return flags;
+
+    // Spending the shielded pool means spending a reserved witness version, which
+    // DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM exists to refuse. Here it is not an
+    // unknown upgrade being probed but a script this node knows, whose real rule
+    // (Rule P1: moving pool coins requires a valid FCMP payload) is enforced in
+    // consensus. Leaving the flag on made every shielded spend unrelayable while
+    // still being perfectly valid in a block.
+    for (const CTxIn& in : tx.vin) {
+        const Coin& coin = mapInputs.AccessCoin(in.prevout);
+        if (!coin.IsSpent() && privacy::IsPoolScript(coin.out.scriptPubKey)) {
+            flags &= ~SCRIPT_VERIFY_DISCOURAGE_UPGRADABLE_WITNESS_PROGRAM;
+            break;
+        }
+    }
+
+    return flags;
 }
 
 bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs)

@@ -522,14 +522,18 @@ bool CFcmpConsensusState::CheckFcmpTransaction(const CTransaction& tx, TxValidat
                                  "FCMP input has null key image");
         }
 
-        // 2. Input tuple points must be valid
-        if (!input.inputTuple.O_tilde.IsValid() ||
-            !input.inputTuple.I_tilde.IsValid() ||
-            !input.inputTuple.C_tilde.IsValid()) {
-            return state.Invalid(TxValidationResult::TX_CONSENSUS,
-                                 "fcmp-input-invalid-points",
-                                 "FCMP input has invalid curve points");
-        }
+        // 2. O~, I~ and R are NOT checked here, and must not be.
+        //
+        // They live inside the membership proof, where fcmp_verify_full reads
+        // them. A separately transmitted copy could only ever agree or disagree
+        // with what was actually proven, and there is nothing useful to do with
+        // one that disagrees -- so the wallet does not send them at all, and
+        // requiring them here rejected every correctly-built transaction with a
+        // message pointing at the curve rather than at the format.
+        //
+        // C~ is different: it is the pseudo-output, published because value
+        // conservation is checked over it, and it is validated at step 4 below
+        // and bound to the proof by fcmp_verify_full.
 
         // 3. Membership proof must be present
         if (input.membershipProof.proofData.empty()) {
@@ -919,31 +923,9 @@ void ShutdownFcmpConsensus()
 // Shielded Pool (value backing)
 // ============================================================================
 
-const CScript& GetShieldedPoolScript()
-{
-    // Witness program, version 16 (as-yet unassigned), 32-byte domain-separated
-    // program. Unassigned witness versions are anyone-can-spend to nodes that do
-    // not know the rule, which is what lets this deploy as a softfork; Rule P1 is
-    // what actually protects the funds.
-    //
-    // The program is a fixed constant, NOT a hash of anything transaction-specific:
-    // there is exactly one pool, and every node must recognise it byte-for-byte
-    // without needing any context to derive it.
-    static const CScript pool_script = [] {
-        const std::string tag = "WATTx FCMP shielded pool v1";
-        const uint256 program = Hash(std::span<const unsigned char>(
-            reinterpret_cast<const unsigned char*>(tag.data()), tag.size()));
-        CScript s;
-        s << OP_16 << std::vector<unsigned char>(program.begin(), program.end());
-        return s;
-    }();
-    return pool_script;
-}
-
-bool IsPoolScript(const CScript& scriptPubKey)
-{
-    return scriptPubKey == GetShieldedPoolScript();
-}
+// GetShieldedPoolScript and IsPoolScript now live in fcmp_pool_script.cpp, which
+// is built into bitcoin_common so transaction policy can use them too. The pool's
+// identity is consensus-critical, so it gets exactly one definition.
 
 bool CreatesPool(const CTransaction& tx)
 {
