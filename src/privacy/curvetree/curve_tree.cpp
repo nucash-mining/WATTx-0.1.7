@@ -326,8 +326,18 @@ std::vector<uint64_t> CurveTree::AddOutputs(const std::vector<OutputTuple>& outp
     std::vector<uint64_t> indices;
     indices.reserve(outputs.size());
 
+    // Store the outputs and COMMIT before hashing anything.
+    //
+    // Hashing inside the same batch silently produced an empty tree: the storage
+    // backend routes writes into the pending batch, but GetOutput reads straight
+    // from the database, so ComputeLeafNode saw NONE of the outputs just written
+    // and hashed an empty branch. The tree reported a growing output count with a
+    // zero root -- and any membership proof would have been verified against
+    // that zero root.
+    //
+    // The old code hid this: an empty branch returned the hasher's init point,
+    // a plausible-looking non-zero value.
     m_storage->BeginBatch();
-
     for (const auto& output : outputs) {
         if (!output.IsValid()) {
             m_storage->AbortBatch();
@@ -339,11 +349,15 @@ std::vector<uint64_t> CurveTree::AddOutputs(const std::vector<OutputTuple>& outp
         indices.push_back(index);
         m_output_count++;
     }
+    if (!m_storage->CommitBatch()) {
+        throw std::runtime_error("Failed to commit outputs to tree storage");
+    }
 
     // Update depth
     m_depth = CalculateDepth(m_output_count);
 
-    // Rebuild affected portions (or full rebuild for efficiency with large batches)
+    // Now the outputs are readable, so the hashes can be computed over them.
+    m_storage->BeginBatch();
     if (outputs.size() > 100) {
         // Full rebuild is more efficient for large batches
         Rebuild();
@@ -353,7 +367,6 @@ std::vector<uint64_t> CurveTree::AddOutputs(const std::vector<OutputTuple>& outp
             UpdatePath(idx);
         }
     }
-
     m_storage->CommitBatch();
     m_root_dirty = true;
 

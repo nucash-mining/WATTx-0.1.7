@@ -588,10 +588,76 @@ bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationSt
     CPrivacyTransaction privTx;
     const bool has_payload = DecodeFcmpTransaction(tx, privTx);
 
-    if (touches_pool && !has_payload) {
+    // A PURE SHIELD -- pays into the pool, spends nothing from it -- needs no
+    // payload, because there is nothing hidden to prove. With no shielded
+    // inputs the ledger invariant collapses to
+    //
+    //     delta*H == sum(note commitments)
+    //
+    // and every term is already public: delta comes from the transparent outputs
+    // and the commitments are the C already carried in each note's OP_RETURN.
+    // Checking it directly is what a payload would have proven anyway.
+    //
+    // PRIVACY COST, deliberate and documented: delta*H carries no blinding, so
+    // each note's commitment must be zero-blinded, which leaves the shielded
+    // AMOUNT visible in the tree permanently. A shield's amount is already
+    // public from the transparent input funding it, so nothing is revealed that
+    // was not; but the note stays linkable to that amount forever. Hiding it
+    // needs a binding signature proving knowledge of the blinding sum -- see
+    // doc/design/fcmp-value-balance.md.
+    const bool pure_shield = creates_pool && !spends_pool && !has_payload;
+
+    if (touches_pool && !has_payload && !pure_shield) {
         return state.Invalid(TxValidationResult::TX_CONSENSUS,
                              "fcmp-pool-without-payload",
                              "transaction touches the shielded pool without a valid FCMP payload");
+    }
+
+    if (pure_shield) {
+        CAmount delta = 0;
+        if (!ComputePoolDelta(tx, view, delta)) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-pool-delta-unavailable",
+                                 "could not compute the shielded pool delta");
+        }
+        // A shield can only ADD to the pool. A negative delta here would mean
+        // value leaving without any proof of the right to remove it.
+        if (delta <= 0) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-shield-nonpositive-delta",
+                                 "shield does not add value to the shielded pool");
+        }
+
+        const auto notes = ExtractFcmpOutputs(tx);
+        if (notes.empty()) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-shield-without-notes",
+                                 "value paid into the shielded pool with no note to claim it");
+        }
+
+        ed25519::Point sum = ed25519::Point::Identity();
+        for (const auto& n : notes) {
+            if (!n.C.IsValid()) {
+                return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                     "fcmp-shield-bad-commitment",
+                                     "shield note carries an invalid commitment");
+            }
+            sum = sum + n.C;
+        }
+
+        // delta*H with zero blinding, recomputable identically by every verifier.
+        const ed25519::Point expected =
+            ed25519::PedersenCommitment::CommitAmount(static_cast<uint64_t>(delta),
+                                                      ed25519::Scalar::Zero()).GetPoint();
+
+        if (sum.GetBytes() != expected.GetBytes()) {
+            return state.Invalid(TxValidationResult::TX_CONSENSUS,
+                                 "fcmp-shield-imbalance",
+                                 "shield notes do not commit to the value paid into the pool");
+        }
+
+        // Balanced: the notes are worth exactly what was paid in.
+        return true;
     }
     if (has_payload && !touches_pool) {
         // A payload with no pool involvement has no value backing it: its outputs

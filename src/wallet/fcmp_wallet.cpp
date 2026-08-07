@@ -1165,20 +1165,23 @@ curvetree::OutputTuple CFcmpWalletManager::CreateOutputTuple(
     std::vector<uint8_t> toHash(tuple.O.data.begin(), tuple.O.data.end());
     tuple.I = ed25519::Point::HashToPoint(toHash);
 
-    // C = amount*H + blinding*G (Pedersen commitment)
-    // Derive blinding deterministically from the one-time public key
-    // This MUST match the derivation in CreateFcmpRewardOutput (miner) and
-    // ScanTransactionForFcmpOutputs (scanner) so all three agree on C.
-    if (!stealthOut.oneTimePubKey.IsValid()) {
-        // Fallback if no valid stealth output
-        blinding = ed25519::Scalar::Random();
-    } else {
-        std::vector<uint8_t> blindingInput(stealthOut.oneTimePubKey.begin(), stealthOut.oneTimePubKey.end());
-        blindingInput.push_back(0x42); // domain separator for blinding derivation
-        uint256 blindingHash = Hash(blindingInput);
-        blinding = ed25519::Scalar::FromBytesModOrder(
-            std::vector<uint8_t>(blindingHash.begin(), blindingHash.end()));
-    }
+    // C = amount*H + blinding*G, with ZERO blinding.
+    //
+    // A shield has no shielded inputs, so the ledger invariant reduces to
+    // delta*H == sum(note commitments). delta*H carries no blinding, so the note
+    // cannot carry one either or the two sides can never be equal and consensus
+    // rejects every shield as fcmp-shield-imbalance.
+    //
+    // The cost is that the shielded AMOUNT stays visible in the tree. That
+    // amount is already public from the transparent input funding the shield,
+    // so nothing is revealed that was not -- but the note remains linkable to it
+    // permanently. Hiding shield amounts needs a binding signature proving
+    // knowledge of the blinding sum; see doc/design/fcmp-value-balance.md.
+    //
+    // The note becomes unlinkable when it is SPENT: the pseudo-output is
+    // C~ = C + r_c*G with r_c from the prover, and the membership proof hides
+    // which leaf it came from.
+    blinding = ed25519::Scalar::Zero();
     auto commitment = ed25519::PedersenCommitment::CommitAmount(
         static_cast<uint64_t>(amount),
         blinding
