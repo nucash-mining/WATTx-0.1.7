@@ -32,6 +32,7 @@
 #include <node/blockstorage.h>
 #include <node/coin.h>
 #include <node/context.h>
+#include <privacy/fcmp_consensus.h>
 #include <node/interface_ui.h>
 #include <node/mini_miner.h>
 #include <node/miner.h>
@@ -1001,6 +1002,10 @@ public:
     {
         LOCK(::cs_main);
         return chainman().ActiveChainstate().CoinsTip();
+    }
+    bool findPoolUtxos(std::map<COutPoint, Coin>& out) override
+    {
+        return privacy::FindPoolUtxos(chainman().ActiveChainstate(), out);
     }
     size_t getNodeCount(ConnectionDirection flags) override
     {

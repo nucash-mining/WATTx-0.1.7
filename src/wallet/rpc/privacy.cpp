@@ -17,6 +17,9 @@
 #include <privacy/privacy.h>
 #include <privacy/curvetree/curve_tree.h>
 #include <privacy/fcmp_consensus.h>
+#include <validation.h>
+#include <rpc/blockchain.h>
+#include <node/context.h>
 #include <key_io.h>
 #include <util/strencodings.h>
 #include <util/moneystr.h>
@@ -483,6 +486,31 @@ static RPCHelpMan sendfcmp()
             params.subtractFeeFromAmount = subtractFee;
 
             // Create transaction
+            // Select the pool UTXOs that will fund this spend.
+            //
+            // The pool script is not wallet-owned, so its coins cannot come from
+            // wallet coin selection -- they are read from the chain's UTXO set.
+            // These become the transaction's real inputs, which is what
+            // ToFcmpTransaction needs and what sendfcmp never had: it used to
+            // emit a transaction with vin: [] that could not confirm.
+            std::vector<COutPoint> poolInputs;
+            CAmount poolTotal = 0;
+            {
+                std::map<COutPoint, Coin> poolCoins;
+                if (!pwallet->chain().findPoolUtxos(poolCoins)) {
+                    throw JSONRPCError(RPC_INTERNAL_ERROR,
+                                       "Could not read the shielded pool's outputs");
+                }
+                if (!privacy::SelectPoolUtxos(poolCoins, amount, poolInputs, poolTotal)) {
+                    CAmount held = 0;
+                    for (const auto& [op, c] : poolCoins) held += c.out.nValue;
+                    throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
+                        strprintf("The shielded pool holds %s, which cannot cover %s. "
+                                  "Shield more first.",
+                                  FormatMoney(held), FormatMoney(amount)));
+                }
+            }
+
             auto result = fcmpManager->CreateFcmpTransaction({recipient}, params);
 
             if (!result.success) {

@@ -432,6 +432,14 @@ public:
     //! Get coins tip.
     virtual CCoinsViewCache& getCoinsTip() = 0;
 
+    //! Find every unspent output paying into the FCMP shielded pool.
+    //!
+    //! The pool script is not owned by any wallet, so its coins cannot come from
+    //! wallet coin selection and have to be read from the chain's UTXO set. This
+    //! needs a cursor over the whole set, which getCoinsTip() (a cache) cannot
+    //! provide, so it lives here rather than in the wallet.
+    virtual bool findPoolUtxos(std::map<COutPoint, Coin>& out) = 0;
+
     //! Get number of connections.
     virtual size_t getNodeCount(ConnectionDirection flags) = 0;
 

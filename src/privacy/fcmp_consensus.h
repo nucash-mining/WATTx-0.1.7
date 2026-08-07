@@ -29,15 +29,18 @@
 #include <privacy/curvetree/curve_tree.h>
 #include <consensus/validation.h>
 #include <consensus/params.h>
+#include <coins.h>
 #include <dbwrapper.h>
 #include <sync.h>
 
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
 
 class CBlockIndex;
 class CCoinsViewCache;
+class Chainstate;
 
 namespace privacy {
 
@@ -349,6 +352,36 @@ bool SpendsPool(const CTransaction& tx, const CCoinsViewCache& view);
 
 /** @brief Does this transaction create at least one pool output? */
 bool CreatesPool(const CTransaction& tx);
+
+/**
+ * @brief Find every unspent output paying into the shielded pool.
+ *
+ * The pool script is not owned by any wallet, so its coins cannot come from
+ * wallet coin selection -- they have to be read from the chain's UTXO set. This
+ * walks that set and returns the pool's outputs, which are collectively the
+ * shielded supply.
+ *
+ * @param chainstate  active chainstate to scan
+ * @param out         receives outpoint -> coin for every pool output found
+ * @return false if the UTXO cursor could not be opened
+ */
+bool FindPoolUtxos(Chainstate& chainstate, std::map<COutPoint, Coin>& out);
+
+/**
+ * @brief Select pool outputs covering at least @p target.
+ *
+ * Largest-first, which keeps the input count (and so the proof count) down.
+ *
+ * @param available  pool outputs, e.g. from FindPoolUtxos
+ * @param target     amount that must be covered
+ * @param selected   receives the chosen outpoints
+ * @param total      receives the value of the selection
+ * @return false if the pool does not hold enough
+ */
+bool SelectPoolUtxos(const std::map<COutPoint, Coin>& available,
+                     CAmount target,
+                     std::vector<COutPoint>& selected,
+                     CAmount& total);
 
 /**
  * @brief Get the FCMP activation height

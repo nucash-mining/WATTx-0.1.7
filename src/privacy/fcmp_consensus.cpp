@@ -10,6 +10,9 @@
 #include <privacy/curvetree/tree_db.h>
 #include <chain.h>
 #include <coins.h>
+#include <algorithm>
+#include <txdb.h>
+#include <validation.h>
 #include <util/moneystr.h>
 #include <logging.h>
 #include <hash.h>
@@ -992,6 +995,64 @@ bool ComputePoolDelta(const CTransaction& tx, const CCoinsViewCache& view, CAmou
 
     delta = created - spent;
     return true;
+}
+
+bool FindPoolUtxos(Chainstate& chainstate, std::map<COutPoint, Coin>& out)
+{
+    out.clear();
+
+    std::unique_ptr<CCoinsViewCursor> cursor;
+    {
+        LOCK(cs_main);
+        chainstate.ForceFlushStateToDisk();
+        cursor = chainstate.CoinsDB().Cursor();
+    }
+    if (!cursor) return false;
+
+    const CScript& pool = GetShieldedPoolScript();
+    while (cursor->Valid()) {
+        COutPoint key;
+        Coin coin;
+        if (cursor->GetKey(key) && cursor->GetValue(coin)) {
+            if (!coin.IsSpent() && coin.out.scriptPubKey == pool) {
+                out.emplace(key, coin);
+            }
+        }
+        cursor->Next();
+    }
+    return true;
+}
+
+bool SelectPoolUtxos(const std::map<COutPoint, Coin>& available,
+                     CAmount target,
+                     std::vector<COutPoint>& selected,
+                     CAmount& total)
+{
+    selected.clear();
+    total = 0;
+    if (target < 0) return false;
+
+    // Largest first: fewer inputs means fewer membership proofs, and each proof
+    // is kilobytes.
+    std::vector<std::pair<COutPoint, CAmount>> sorted;
+    sorted.reserve(available.size());
+    for (const auto& [op, coin] : available) {
+        sorted.emplace_back(op, coin.out.nValue);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const auto& a, const auto& b) { return a.second > b.second; });
+
+    for (const auto& [op, value] : sorted) {
+        selected.push_back(op);
+        total += value;
+        if (total >= target) return true;
+    }
+
+    // Not enough in the pool. Report it rather than returning a short selection
+    // the caller might spend anyway.
+    selected.clear();
+    total = 0;
+    return false;
 }
 
 bool HasFcmpInputs(const CTransaction& tx)
