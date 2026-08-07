@@ -1707,6 +1707,11 @@ bool WalletBatch::WriteFcmpSpentKeyImage(const uint256& hash, const uint256& txH
     return WriteIC(std::make_pair(DBKeys::FCMP_SPENT_KI, hash), txHash);
 }
 
+bool WalletBatch::EraseFcmpSpentKeyImage(const uint256& hash)
+{
+    return EraseIC(std::make_pair(DBKeys::FCMP_SPENT_KI, hash));
+}
+
 //
 // Privacy record loading
 //

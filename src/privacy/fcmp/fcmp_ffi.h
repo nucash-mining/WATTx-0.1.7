@@ -38,33 +38,6 @@ extern "C" {
 // Types
 // ============================================================================
 
-/**
- * Branch layer data for proof generation
- */
-typedef struct {
-    uint32_t num_elements;    // Number of elements in this layer
-    const uint8_t* elements;  // Pointer to elements (32 bytes each)
-} FcmpBranchLayer;
-
-/**
- * Branch (Merkle path) for proof generation
- */
-typedef struct {
-    uint64_t leaf_index;              // Index of the leaf output
-    uint32_t num_layers;              // Number of layers in branch
-    const FcmpBranchLayer* layers;    // Array of layer data
-} FcmpBranch;
-
-/**
- * Input tuple for proof verification
- */
-typedef struct {
-    uint8_t o_tilde[64];   // Re-randomized O point (x, y as scalars)
-    uint8_t i_tilde[64];   // Re-randomized I point
-    uint8_t r[64];         // R value for SA+L
-    uint8_t c_tilde[64];   // Re-randomized C point
-} FcmpInput;
-
 // ============================================================================
 // Initialization
 // ============================================================================
@@ -212,45 +185,6 @@ int32_t fcmp_pedersen_commit(uint8_t* out, const uint8_t* value, const uint8_t* 
  */
 size_t fcmp_proof_size(uint32_t num_inputs, uint32_t num_layers);
 
-/**
- * Generate an FCMP proof.
- *
- * @param proof_out Output buffer for proof
- * @param proof_len_out Output: actual proof length
- * @param proof_max_len Maximum size of proof buffer
- * @param tree_root Tree root point (32 bytes)
- * @param output Output tuple (96 bytes: O || I || C)
- * @param branch Branch/path data
- * @param secret_key Secret key for Schnorr proof (32 bytes)
- * @param rerandomizer Rerandomization scalar (32 bytes)
- * @return FCMP_SUCCESS on success
- */
-int32_t fcmp_prove(
-    uint8_t* proof_out,
-    size_t* proof_len_out,
-    size_t proof_max_len,
-    const uint8_t* tree_root,
-    const uint8_t* output,
-    const FcmpBranch* branch,
-    const uint8_t* secret_key,
-    const uint8_t* rerandomizer
-);
-
-/**
- * Verify an FCMP proof.
- *
- * @param tree_root Tree root point (32 bytes)
- * @param input Input tuple for verification
- * @param proof Proof data
- * @param proof_len Length of proof
- * @return FCMP_SUCCESS if valid, FCMP_ERROR_PROOF_VERIFICATION if invalid
- */
-int32_t fcmp_verify(
-    const uint8_t* tree_root,
-    const FcmpInput* input,
-    const uint8_t* proof,
-    size_t proof_len
-);
 
 // ============================================================================
 // Full FCMP++ Proof Operations (Real Implementation)

@@ -432,6 +432,24 @@ public:
         int blockHeight = -1);
 
     /**
+     * @brief Undo this block's effect on tracked notes, for a reorg.
+     *
+     * Without this the wallet's view of a disconnected block simply persists:
+     * a note whose spending transaction was orphaned stays marked spent, so its
+     * value is unspendable forever even though consensus has released the key
+     * image; and notes the orphaned block created keep counting toward the
+     * balance despite no longer existing in the curve tree.
+     *
+     * Notes created by the block are marked unconfirmed rather than deleted. A
+     * change note's blinding is the balancing one and cannot be re-derived from
+     * anything public, so deleting it would destroy the only copy if the block
+     * were later reconnected.
+     *
+     * @return number of tracked notes affected
+     */
+    int RollbackBlock(const CBlock& block);
+
+    /**
      * @brief Scan a block for FCMP outputs
      * @param block Block to scan
      * @param blockHeight Block height

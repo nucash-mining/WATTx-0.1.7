@@ -397,6 +397,14 @@ bool CurveTree::RemoveLastN(uint64_t count) {
     if (count == 0) return true;
     if (count > m_output_count) return false;
 
+    // How wide the tree was BEFORE the removal. Needed to bound the orphan
+    // cleanup below: the nodes to delete are exactly those between the new
+    // width and the old one, and that range has to be computed while the old
+    // width is still known.
+    const uint64_t old_leaf_commits = (m_output_count + TreeConfig::LEAF_BRANCH_WIDTH - 1) /
+                                       TreeConfig::LEAF_BRANCH_WIDTH;
+    const uint32_t old_depth = m_depth;
+
     m_storage->BeginBatch();
 
     // Delete outputs from the end
@@ -427,14 +435,23 @@ bool CurveTree::RemoveLastN(uint64_t count) {
             m_storage->StoreNode(TreeIndex(0, i), TreeNode(hash, end - start));
         }
 
-        // Clean up any orphaned leaf nodes beyond current range
-        for (uint64_t i = num_leaf_commits; ; ++i) {
-            if (!m_storage->DeleteNode(TreeIndex(0, i))) break;
+        // Clean up any orphaned leaf nodes beyond current range.
+        //
+        // Bounded by how wide the layer USED to be. This loop had no bound and
+        // stopped only when DeleteNode returned false -- which it never does:
+        // inside a batch it unconditionally returns true, and LevelDB treats
+        // deleting a missing key as success anyway. So it ran forever, appending
+        // a delete to the in-memory batch every iteration, until the node was
+        // OOM-killed. Any reorg that removed a shielded note killed the node.
+        // Only MemoryTreeStorage terminated, which is why the unit tests missed it.
+        for (uint64_t i = num_leaf_commits; i < old_leaf_commits; ++i) {
+            m_storage->DeleteNode(TreeIndex(0, i));
         }
 
         // Rebuild internal layers
         uint64_t nodes_at_prev_layer = num_leaf_commits;
-        for (uint32_t layer = 1; layer < m_depth; ++layer) {
+        uint64_t old_nodes_at_prev_layer = old_leaf_commits;
+        for (uint32_t layer = 1; layer < std::max(m_depth, old_depth); ++layer) {
             uint64_t nodes_at_layer = (nodes_at_prev_layer + TreeConfig::INTERNAL_BRANCH_WIDTH - 1) /
                                        TreeConfig::INTERNAL_BRANCH_WIDTH;
 
@@ -446,12 +463,17 @@ bool CurveTree::RemoveLastN(uint64_t count) {
                 }
             }
 
-            // Clean up orphaned nodes
-            for (uint64_t i = nodes_at_layer; ; ++i) {
-                if (!m_storage->DeleteNode(TreeIndex(layer, i))) break;
+            // Clean up orphaned nodes, bounded by the layer's old width -- same
+            // never-terminating loop as above.
+            const uint64_t old_nodes_at_layer =
+                (old_nodes_at_prev_layer + TreeConfig::INTERNAL_BRANCH_WIDTH - 1) /
+                TreeConfig::INTERNAL_BRANCH_WIDTH;
+            for (uint64_t i = nodes_at_layer; i < old_nodes_at_layer; ++i) {
+                m_storage->DeleteNode(TreeIndex(layer, i));
             }
 
             nodes_at_prev_layer = nodes_at_layer;
+            old_nodes_at_prev_layer = old_nodes_at_layer;
         }
     }
 

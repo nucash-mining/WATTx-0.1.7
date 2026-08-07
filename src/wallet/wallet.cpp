@@ -1638,6 +1638,14 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
 
     int disconnect_height = block.height;
 
+    // Undo the block's effect on shielded notes. Consensus has already erased
+    // this block's key images and rolled the curve tree back; without the same
+    // rollback here the wallet keeps notes marked spent whose spending
+    // transaction no longer exists, and keeps counting notes the block created.
+    if (m_fcmp_manager) {
+        m_fcmp_manager->RollbackBlock(*block.data);
+    }
+
     for (size_t index = 0; index < block.data->vtx.size(); index++) {
         const CTransactionRef& ptx = Assert(block.data)->vtx[index];
         // Coinbase transactions are not only inactive but also abandoned,

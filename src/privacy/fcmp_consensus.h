@@ -244,6 +244,14 @@ private:
     int m_lastBlockHeight{0};
 
     /**
+     * @brief The notes a block contributes to the curve tree, in tree order.
+     *
+     * Used by both ConnectBlock and DisconnectBlock so the two cannot disagree
+     * about how many leaves a block added.
+     */
+    std::vector<curvetree::OutputTuple> BlockNotes(const CBlock& block) const;
+
+    /**
      * @brief Extract FCMP outputs from a transaction
      */
     std::vector<curvetree::OutputTuple> ExtractFcmpOutputs(const CTransaction& tx) const;

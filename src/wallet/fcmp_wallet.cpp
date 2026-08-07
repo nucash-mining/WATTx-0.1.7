@@ -9,7 +9,7 @@
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 #include <privacy/fcmp/fcmp_wrapper.h>
-#include <privacy/fcmp_consensus.h>
+#include <privacy/fcmp_consensus.h>  // DecodeFcmpTransaction, GetShieldedPoolScript
 #include <privacy/ed25519/pedersen.h>
 #include <privacy/stealth.h>
 #include <hash.h>
@@ -1162,6 +1162,56 @@ int CFcmpWalletManager::ScanTransactionForFcmpOutputs(
     return found;
 }
 
+int CFcmpWalletManager::RollbackBlock(const CBlock& block)
+{
+    LOCK(cs_fcmp);
+
+    std::set<uint256> txidsInBlock;
+    for (const auto& tx : block.vtx) {
+        txidsInBlock.insert(tx->GetHash());
+    }
+
+    int affected = 0;
+    WalletBatch batch(m_wallet->GetDatabase());
+
+    for (auto& [outpoint, info] : m_fcmpOutputs) {
+        bool changed = false;
+
+        // A note this block SPENT is spendable again: consensus erased the key
+        // image when it disconnected the block, so refusing to reselect the note
+        // would strand its value permanently.
+        if (info.spent && !info.keyImageHash.IsNull()) {
+            auto it = m_spentKeyImages.find(info.keyImageHash);
+            if (it != m_spentKeyImages.end() && txidsInBlock.count(it->second)) {
+                info.spent = false;
+                m_spentKeyImages.erase(it);
+                batch.EraseFcmpSpentKeyImage(info.keyImageHash);
+                changed = true;
+                LogPrintf("FCMP: note %s un-spent -- the transaction that spent it "
+                          "was disconnected\n", outpoint.ToString());
+            }
+        }
+
+        // A note this block CREATED is no longer in the curve tree, so it is not
+        // spendable and must not count as confirmed. Kept rather than deleted:
+        // a change note's blinding cannot be re-derived, so if the block is
+        // reconnected this record is the only way to recover the note.
+        if (info.blockHeight >= 0 && txidsInBlock.count(outpoint.hash)) {
+            info.blockHeight = -1;
+            changed = true;
+            LogPrintf("FCMP: note %s marked unconfirmed -- the block that created "
+                      "it was disconnected\n", outpoint.ToString());
+        }
+
+        if (changed) {
+            batch.WriteFcmpOutput(outpoint, info);
+            affected++;
+        }
+    }
+
+    return affected;
+}
+
 int CFcmpWalletManager::ScanBlockForFcmpOutputs(
     const CBlock& block,
     int blockHeight)
@@ -1178,6 +1228,26 @@ int CFcmpWalletManager::ScanBlockForFcmpOutputs(
                 batch.WriteFcmpOutput(outpoint, info);
                 LogPrintf("FCMP: Confirmed output %s at height %d\n", outpoint.ToString(), blockHeight);
             }
+        }
+    }
+
+    // Mark notes this block SPENT.
+    //
+    // Spent-marking used to happen only in the sendfcmp RPC, so the wallet
+    // learned about a spend only if it was the one that built it. Anything else
+    // -- a spend re-mined after a reorg, a note spent by another instance of the
+    // same wallet, a wallet restored from seed -- left the note looking
+    // available, and coin selection handed it out again for a transaction
+    // consensus was always going to reject as fcmp-keyimage-spent.
+    for (const auto& tx : block.vtx) {
+        privacy::CPrivacyTransaction privTx;
+        if (!privacy::DecodeFcmpTransaction(*tx, privTx)) continue;
+        for (const auto& input : privTx.fcmpInputs) {
+            auto it = m_keyImages.find(input.keyImage.GetHash());
+            if (it == m_keyImages.end()) continue;
+            auto note = m_fcmpOutputs.find(it->second);
+            if (note == m_fcmpOutputs.end() || note->second.spent) continue;
+            MarkFcmpOutputSpent(note->first, tx->GetHash());
         }
     }
 
@@ -1578,7 +1648,17 @@ std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
     // Key image, as computed by the prover (L = x*I). Deriving it separately
     // risks the two disagreeing, which would look like a double-spend or let one
     // slip through.
-    std::memcpy(fcmpInput.keyImage.data.data(), key_image.data(), 32);
+    //
+    // Written in the canonical CKeyImage layout -- 0x02 tag then the 32-byte
+    // point -- the same encoding GenerateKeyImage produces. The bare 32 bytes
+    // used to be copied over the tag, which broke two things: the wallet's
+    // stored key image could never match the one that appeared on chain, so a
+    // note spent in a block was never recognised as spent; and CKeyImage::IsValid
+    // requires data[0] != 0, so roughly one spend in 256 was rejected as having
+    // a null key image for no discoverable reason.
+    fcmpInput.keyImage.data.assign(33, 0);
+    fcmpInput.keyImage.data[0] = 0x02;  // Ed25519 prefix
+    std::memcpy(fcmpInput.keyImage.data.data() + 1, key_image.data(), 32);
 
     // The pseudo-output IS the C~ this input was re-randomised to, and the same
     // one the caller balanced its output commitments against. Anything else here

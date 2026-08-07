@@ -81,23 +81,6 @@ public:
         : m_tree(std::move(tree)) {}
 
     /**
-     * Generate a proof that an output is in the tree
-     *
-     * @param output The output tuple (O, I, C)
-     * @param leaf_index Index of the output in the tree
-     * @param secret_key Secret key for Schnorr proof construction
-     * @param rerandomizer Rerandomization scalar
-     * @return Serialized proof bytes
-     * @throws FcmpError on failure
-     */
-    std::vector<uint8_t> GenerateProof(
-        const curvetree::OutputTuple& output,
-        uint64_t leaf_index,
-        const ed25519::Scalar& secret_key,
-        const ed25519::Scalar& rerandomizer
-    );
-
-    /**
      * A re-randomisation of one leaf, held between the two halves of a spend.
      *
      * Carries secrets (r_o, r_i, r_r_i, r_c). Anyone holding this and the
@@ -126,11 +109,11 @@ public:
     /**
      * Generate a REAL FCMP++ membership proof over the output's actual branch.
      *
-     * Unlike GenerateProof (which calls the Schnorr-sigma scaffold and proves
-     * nothing about C), this goes through fcmp_prove_full: the audited prover
-     * that binds the re-randomised commitment to the leaf it came from. Without
-     * that binding an attacker can present any C~ they like beside a valid
-     * membership proof, and value conservation becomes unenforceable.
+     * Goes through fcmp_prove_full, the audited prover that binds the
+     * re-randomised commitment to the leaf it came from. Without that binding
+     * an attacker can present any C~ they like beside a valid membership proof,
+     * and value conservation becomes unenforceable -- which is exactly what the
+     * Schnorr-sigma scaffold that used to sit here could not prevent.
      *
      * @param rerandomized from Rerandomize(), for the leaf being spent
      * @param x, y         spend key components satisfying O = x*G + y*T
@@ -168,15 +151,6 @@ public:
      */
     explicit FcmpVerifier(const curvetree::TreeHash& tree_root)
         : m_tree_root(tree_root) {}
-
-    /**
-     * Verify an FCMP proof
-     *
-     * @param input The input tuple for verification
-     * @param proof The proof bytes
-     * @return true if valid, false otherwise
-     */
-    bool Verify(const FcmpInput& input, const std::vector<uint8_t>& proof) const;
 
     /**
      * Update the tree root (e.g., after new blocks)

@@ -73,60 +73,6 @@
  */
 #define ELEMENTS_PER_OUTPUT 6
 
-/**
- * Single layer of a branch
- */
-typedef struct FcmpBranchLayer {
-    /**
-     * Number of elements in this layer
-     */
-    uint32_t num_elements;
-    /**
-     * Pointer to elements (array of 32-byte scalars)
-     */
-    const uint8_t *elements;
-} FcmpBranchLayer;
-
-/**
- * Branch data for proof generation
- */
-typedef struct FcmpBranch {
-    /**
-     * Leaf index in the tree
-     */
-    uint64_t leaf_index;
-    /**
-     * Number of layers
-     */
-    uint32_t num_layers;
-    /**
-     * Pointer to layer data (array of FcmpBranchLayer)
-     */
-    const struct FcmpBranchLayer *layers;
-} FcmpBranch;
-
-/**
- * Input tuple for verification
- */
-typedef struct FcmpInput {
-    /**
-     * Re-randomized O point (x, y coordinates as scalars)
-     */
-    uint8_t o_tilde[64];
-    /**
-     * Re-randomized I point
-     */
-    uint8_t i_tilde[64];
-    /**
-     * R value for SA+L
-     */
-    uint8_t r[64];
-    /**
-     * Re-randomized C point
-     */
-    uint8_t c_tilde[64];
-} FcmpInput;
-
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -259,52 +205,6 @@ int32_t fcmp_pedersen_commit(uint8_t *out, const uint8_t *value, const uint8_t *
  * - Exact proof size in bytes, or 0 if either argument is zero
  */
 uintptr_t fcmp_proof_size(uint32_t num_inputs, uint32_t num_layers);
-
-/**
- * Generate an FCMP proof (Schnorr sigma protocol on curve tree branch)
- *
- * # Safety
- * - All pointers must be valid
- * - `proof_out` must have at least `proof_max_len` bytes available
- * - `proof_len_out` must be writable
- *
- * # Proof structure:
- * - challenge `c` (32 bytes)
- * - For each tree layer: response `s_i` (32 bytes) + commitment `R_i` (32 bytes)
- * - Total size: 32 + num_layers * 64 bytes
- *
- * # Returns
- * - `FCMP_SUCCESS` on success
- * - Error code on failure
- */
-int32_t fcmp_prove(uint8_t *proof_out,
-                   uintptr_t *proof_len_out,
-                   uintptr_t proof_max_len,
-                   const uint8_t *tree_root,
-                   const uint8_t *output,
-                   const struct FcmpBranch *branch,
-                   const uint8_t *secret_key,
-                   const uint8_t *rerandomizer);
-
-/**
- * Verify an FCMP proof (Schnorr sigma protocol verification)
- *
- * Proof format: c (32) || [s_0 (32) || R_0 (32)] || [s_1 (32) || R_1 (32)] || ...
- * For each layer i: verify s_i * G == R_i + c * layer_commitment_i
- * Then recompute Fiat-Shamir challenge and verify c == c'
- *
- * # Safety
- * - All pointers must be valid
- *
- * # Returns
- * - `FCMP_SUCCESS` if proof is valid
- * - `FCMP_ERROR_PROOF_VERIFICATION` if proof is invalid
- * - Other error codes on failure
- */
-int32_t fcmp_verify(const uint8_t *tree_root,
-                    const struct FcmpInput *input,
-                    const uint8_t *proof,
-                    uintptr_t proof_len);
 
 /**
  * Re-randomize the output being spent, WITHOUT yet proving anything about it.

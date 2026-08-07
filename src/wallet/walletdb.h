@@ -342,6 +342,10 @@ public:
     bool EraseFcmpOutput(const COutPoint& outpoint);
     bool WriteFcmpKeyImage(const uint256& hash, const COutPoint& outpoint);
     bool WriteFcmpSpentKeyImage(const uint256& hash, const uint256& txHash);
+    //! Forget that a key image was spent. Needed on a reorg: the spending
+    //! transaction is gone, consensus has released the key image, and leaving
+    //! the record would keep the note unspendable forever.
+    bool EraseFcmpSpentKeyImage(const uint256& hash);
 
     DBErrors LoadWallet(CWallet* pwallet);
 

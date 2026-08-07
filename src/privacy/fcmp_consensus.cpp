@@ -230,6 +230,28 @@ bool CFcmpConsensusState::IsKeyImageSpent(const CKeyImage& keyImage) const
     return m_keyImageDB->IsSpent(keyImage);
 }
 
+// The notes a block contributes to the curve tree, in tree order.
+//
+// ConnectBlock and DisconnectBlock MUST agree on this exactly, or a reorg
+// removes the wrong number of leaves and the tree root silently diverges from
+// every other node. Deriving it from the block both times is what keeps them in
+// step -- DisconnectBlock used to read an in-memory map populated by
+// ConnectBlock, which is empty after a restart, so a reorg across a restart
+// rolled back nothing at all and left orphaned notes in the tree forever.
+std::vector<curvetree::OutputTuple> CFcmpConsensusState::BlockNotes(const CBlock& block) const
+{
+    std::vector<curvetree::OutputTuple> notes;
+    for (const auto& tx : block.vtx) {
+        // A note may only enter the tree from a transaction that PAID for it by
+        // creating a pool output. Same gate as ConnectBlock applies here.
+        if (!CreatesPool(*tx)) continue;
+        for (auto& output : ExtractFcmpOutputs(*tx)) {
+            notes.push_back(std::move(output));
+        }
+    }
+    return notes;
+}
+
 bool CFcmpConsensusState::ConnectBlock(const CBlock& block, const CBlockIndex* pindex)
 {
     LOCK(cs_fcmp);
@@ -370,20 +392,30 @@ bool CFcmpConsensusState::DisconnectBlock(const CBlock& block, const CBlockIndex
             return false;
         }
         m_keyImagesSpent -= keyImagesToUnmark.size();
+        LogPrintf("FCMP: Block %d disconnected. Released %lu key image(s)\n",
+                  height, keyImagesToUnmark.size());
+    } else {
+        LogPrintf("FCMP: Block %d disconnected with no key images to release\n", height);
     }
 
-    // Remove outputs from curve tree
-    auto it = m_outputsAddedPerBlock.find(height);
-    if (it != m_outputsAddedPerBlock.end() && it->second > 0) {
-        if (!m_curveTree->RemoveLastN(it->second)) {
+    // Remove this block's notes from the curve tree.
+    //
+    // Counted from the block, NOT from m_outputsAddedPerBlock: that map lives
+    // only in memory, so after a restart it holds nothing and a reorg removed no
+    // leaves at all. The tree then kept notes from an orphaned block forever,
+    // its root diverged from every other node, and no proof built against it
+    // could verify anywhere.
+    const uint64_t noteCount = BlockNotes(block).size();
+    if (noteCount > 0) {
+        if (!m_curveTree->RemoveLastN(noteCount)) {
             LogPrintf("FCMP: Failed to remove %lu outputs from curve tree for block %d\n",
-                      it->second, height);
+                      noteCount, height);
             return false;
         }
         LogPrintf("FCMP: Block %d disconnected. Removed %lu outputs. Tree size: %lu\n",
-                  height, it->second, m_curveTree->GetOutputCount());
-        m_outputsAddedPerBlock.erase(it);
+                  height, noteCount, m_curveTree->GetOutputCount());
     }
+    m_outputsAddedPerBlock.erase(height);
 
     if (height <= m_lastBlockHeight) {
         m_lastBlockHeight = height - 1;
