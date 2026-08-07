@@ -137,13 +137,24 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
     result.privacyTx.nFee = fee;
     result.fee = fee;
 
-    // Build FCMP inputs
+    // Build FCMP inputs, keeping each pseudo-output's blinding.
+    //
+    // The prover re-randomises as C~ = C + r_c*G, so the pseudo-output commits
+    // to the same value under blinding b~ = b + r_c. Balancing the outputs
+    // against the ORIGINAL b would leave the G-components uncancelled and the
+    // transaction could never balance -- with nothing to indicate why.
+    std::vector<privacy::CBlindingFactor> inputBlinds;
+    inputBlinds.reserve(selectedInputs.size());
+
     for (const auto& input : selectedInputs) {
-        auto fcmpInput = BuildFcmpInput(input, messageHash);
+        ed25519::Scalar r_c;
+        auto fcmpInput = BuildFcmpInput(input, messageHash, r_c);
         if (!fcmpInput) {
             result.error = "Failed to build FCMP input";
             return result;
         }
+
+        inputBlinds.push_back(ToBlindingFactor(input.blinding + r_c));
 
         result.privacyTx.fcmpInputs.push_back(*fcmpInput);
         result.keyImages.push_back(fcmpInput->keyImage);
@@ -278,12 +289,6 @@ CFcmpTransactionResult CFcmpWalletManager::CreateFcmpTransaction(
     // values. The last shielded output's blinding is replaced with
     // sum(inputBlinds) - sum(other outputBlinds) and its commitment recomputed.
     if (!outputBlinds.empty()) {
-        std::vector<privacy::CBlindingFactor> inputBlinds;
-        inputBlinds.reserve(selectedInputs.size());
-        for (const auto& in : selectedInputs) {
-            inputBlinds.push_back(ToBlindingFactor(in.blinding));
-        }
-
         if (inputBlinds.empty()) {
             result.error = "Shielded outputs with no shielded inputs to fund them";
             return result;
@@ -1225,7 +1230,8 @@ bool CFcmpWalletManager::SelectInputs(
 
 std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
     const CFcmpOutputInfo& output,
-    const uint256& messageHash)
+    const uint256& messageHash,
+    ed25519::Scalar& c_blind_out)
 {
     AssertLockHeld(cs_fcmp);
 
@@ -1235,86 +1241,69 @@ std::optional<privacy::CFcmpInput> CFcmpWalletManager::BuildFcmpInput(
 
     privacy::CFcmpInput fcmpInput;
 
-    // Generate key image
-    fcmpInput.keyImage = GenerateKeyImage(output.privKey, output.outputTuple.O);
+    // Everything below comes from fcmp_prove_full, the audited prover.
+    //
+    // This used to hand-roll the re-randomisation, the SA+L signature and the
+    // pseudo-output, then call a Schnorr-sigma scaffold for the "membership
+    // proof". Three things were wrong with that:
+    //
+    //   * the scaffold proved nothing about C, so an attacker could present any
+    //     pseudo-output beside a valid proof and value conservation was
+    //     unenforceable;
+    //   * C~ was computed as C + r*H -- on the VALUE generator, which changes
+    //     the committed amount rather than masking it;
+    //   * and the published pseudo-output was the leaf's own C, a byte-for-byte
+    //     copy of a public tree leaf, which identified exactly which note was
+    //     being spent and defeated the membership proof's entire purpose.
+    //
+    // The real prover draws its own blinds, binds C~ to the leaf it came from,
+    // and produces the SA+L signature inside the proof.
+    //
+    // The wallet's spend key is x with O = x*G and no T component, so y = 0.
+    const ed25519::Scalar y = ed25519::Scalar::Zero();
 
-    // Re-randomize input
-    ed25519::Scalar rerandomizer = ed25519::Scalar::Random();
-
-    auto G = ed25519::Point::BasePoint();
-    auto H = ed25519::PedersenGenerators::Default().H();
-
-    // O_tilde = O + r*G
-    auto rG = rerandomizer * G;
-    fcmpInput.inputTuple.O_tilde = output.outputTuple.O + rG;
-
-    // I_tilde = I (cannot re-randomize key image)
-    fcmpInput.inputTuple.I_tilde = output.outputTuple.I;
-
-    // R = r*G
-    fcmpInput.inputTuple.R = rG;
-
-    // C_tilde = C + r*H
-    auto rH = rerandomizer * H;
-    fcmpInput.inputTuple.C_tilde = output.outputTuple.C + rH;
-
-    // Generate membership proof
-    auto branch = m_curveTree->GetBranch(output.treeLeafIndex);
-    if (!branch) {
-        LogPrintf("FCMP: Failed to get branch for leaf %lu\n",
-                  output.treeLeafIndex);
-        return std::nullopt;
-    }
+    std::array<uint8_t, 32> key_image{};
+    std::array<uint8_t, 32> c_tilde{};
+    std::array<uint8_t, 32> c_blind{};
 
     try {
         privacy::fcmp::FcmpContext ctx;
         privacy::fcmp::FcmpProver prover(m_curveTree);
-        auto proofBytes = prover.GenerateProof(
-            output.outputTuple, output.treeLeafIndex,
-            output.privKey, rerandomizer
-        );
+        auto proofBytes = prover.GenerateFullProof(
+            output.treeLeafIndex,
+            output.privKey, y,
+            messageHash,
+            key_image, c_tilde, c_blind);
+
         fcmpInput.membershipProof = privacy::CFcmpProof(
             std::move(proofBytes),
-            m_curveTree->GetRoot()
-        );
+            m_curveTree->GetRoot());
     } catch (const std::exception& e) {
         LogPrintf("FCMP: Proof generation failed: %s\n", e.what());
         return std::nullopt;
     }
 
-    // Generate SA+L signature
-    // c = H(R || I_tilde || O_tilde || message)
-    HashWriter sigHasher{};
-    sigHasher << fcmpInput.inputTuple.R.data;
-    sigHasher << fcmpInput.inputTuple.I_tilde.data;
-    sigHasher << fcmpInput.inputTuple.O_tilde.data;
-    sigHasher << messageHash;
-    uint256 challengeHash = sigHasher.GetHash();
+    // Key image, as computed by the prover (L = x*I). Deriving it separately
+    // risks the two disagreeing, which would look like a double-spend or let one
+    // slip through.
+    std::memcpy(fcmpInput.keyImage.data.data(), key_image.data(), 32);
 
-    fcmpInput.salSignature.c = ed25519::Scalar::FromBytesModOrder(
-        std::vector<uint8_t>(challengeHash.begin(), challengeHash.end())
-    );
+    // The pseudo-output IS the prover's C~. Carrying it in both places keeps the
+    // struct self-consistent: verification passes pseudoOutput to
+    // fcmp_verify_full, and nothing may disagree with the proof.
+    fcmpInput.pseudoOutput.data.assign(33, 0);
+    fcmpInput.pseudoOutput.data[0] = 0x0E;  // ed25519 curve tag
+    std::memcpy(fcmpInput.pseudoOutput.data.data() + 1, c_tilde.data(), 32);
+    std::memcpy(fcmpInput.inputTuple.C_tilde.data.data(), c_tilde.data(), 32);
 
-    // s = r + c*(x + r), where O_tilde = (x+r)*G
-    auto xPlusR = output.privKey + rerandomizer;
-    auto cxr = fcmpInput.salSignature.c * xPlusR;
-    fcmpInput.salSignature.s = rerandomizer + cxr;
+    // O~, I~, R and the SA+L signature live INSIDE the proof and are read from
+    // it by fcmp_verify_full. Leaving hand-computed copies here would let them
+    // drift from what was actually proven, so they stay unset.
 
-    // Create the pseudo-output commitment.
-    //
-    // NOTE: this publishes the leaf's OWN commitment C, un-rerandomized -- a
-    // byte-for-byte copy of a public tree leaf, which identifies exactly which
-    // note is being spent and defeats the membership proof's whole purpose. It
-    // must become C~ = C + r_c*G, with r_c from the real prover (now exported as
-    // fcmp_prove_full's c_blind_out) and the blinding tracked as b~ = b + r_c so
-    // the outputs can be balanced against it. That change is blocked on the
-    // curve-tree work (P-c in doc/design/fcmp-value-balance.md); leaving it
-    // as-is is a PRIVACY LEAK, not a value bug -- the balance below is still
-    // sound because b~ reduces to b when r_c is zero.
-    if (!MakeCommitment(output.amount, output.blinding, fcmpInput.pseudoOutput)) {
-        LogPrintf("FCMP: Failed to create pseudo-output commitment\n");
-        return std::nullopt;
-    }
+    // Hand r_c back: the pseudo-output's blinding is b~ = b + r_c, and balancing
+    // the outputs against b instead of b~ produces a transaction that cannot
+    // balance, with nothing to indicate why.
+    c_blind_out = ed25519::Scalar::FromBytesModOrder(c_blind.data(), 32);
 
     return fcmpInput;
 }

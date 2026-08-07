@@ -494,9 +494,17 @@ private:
      * @param messageHash Transaction message hash
      * @return FCMP input or nullopt on error
      */
+    //! Build one FCMP input using the REAL prover.
+    //!
+    //! @param c_blind_out receives r_c, the commitment re-randomiser the prover
+    //!        drew internally. The pseudo-output is C~ = C + r_c*G, so its
+    //!        blinding is b~ = b + r_c, and the caller MUST use b~ (not b) when
+    //!        balancing the outputs or the transaction cannot balance. SECRET:
+    //!        publishing r_c alongside C~ re-links the input to its tree leaf.
     std::optional<privacy::CFcmpInput> BuildFcmpInput(
         const CFcmpOutputInfo& output,
-        const uint256& messageHash) EXCLUSIVE_LOCKS_REQUIRED(cs_fcmp);
+        const uint256& messageHash,
+        ed25519::Scalar& c_blind_out) EXCLUSIVE_LOCKS_REQUIRED(cs_fcmp);
 
     /**
      * @brief Compute transaction message hash

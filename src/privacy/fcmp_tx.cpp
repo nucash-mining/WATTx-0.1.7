@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <privacy/fcmp_tx.h>
+#include <array>
 #include <privacy/fcmp/fcmp_wrapper.h>
 #include <privacy/privacy.h>  // For IsKeyImageSpent
 #include <privacy/ed25519/ed25519_types.h>
@@ -280,50 +281,42 @@ bool VerifyFcmpInput(
     const curvetree::TreeHash& treeRoot,
     const uint256& messageHash
 ) {
-    // 1. Verify input is structurally valid
+    // 1. Structurally valid: key image, pseudo-output and proof all present.
     if (!input.IsValid()) {
         return false;
     }
 
-    // 2. Verify tree root matches proof
+    // 2. The proof must name the root we are verifying against.
     if (input.membershipProof.treeRoot != treeRoot) {
         return false;
     }
 
-    // 3. Verify SA+L signature
-    // s*G should equal R + c*O_tilde
-    auto G = ed25519::Point::BasePoint();
-    auto sG = input.salSignature.s * G;
-    auto cO = input.salSignature.c * input.inputTuple.O_tilde;
-    auto R_plus_cO = input.inputTuple.R + cO;
+    // 3. Verify through fcmp_verify_full -- the audited verifier that checks the
+    //    membership proof AND the SA+L signature AND binds the pseudo-output to
+    //    the leaf it came from, all against this root and message.
+    //
+    //    This previously checked a hand-rolled SA+L equation and then called
+    //    fcmp_verify, the Schnorr-sigma scaffold. That scaffold proved nothing
+    //    about C, so an attacker could present any pseudo-output beside a
+    //    "valid" proof and value conservation was unenforceable.
+    std::array<uint8_t, 32> key_image{};
+    std::array<uint8_t, 32> c_tilde{};
+    if (input.keyImage.data.size() < 32) return false;
+    std::memcpy(key_image.data(), input.keyImage.data.data(), 32);
 
-    if (sG.data != R_plus_cO.data) {
-        return false;
-    }
+    // pseudoOutput is the 33-byte tagged commitment; the verifier wants the
+    // bare 32-byte point.
+    if (input.pseudoOutput.data.size() != 33) return false;
+    std::memcpy(c_tilde.data(), input.pseudoOutput.data.data() + 1, 32);
 
-    // 4. Verify FCMP proof via Rust FFI
-    {
-        fcmp::FcmpContext ctx;
-        fcmp::FcmpVerifier verifier(treeRoot);
+    fcmp::FcmpContext ctx;
+    fcmp::FcmpVerifier verifier(treeRoot);
 
-        // Convert input tuple to FFI format
-        FcmpInput ffiInput;
-        std::memset(&ffiInput, 0, sizeof(ffiInput));
-        std::memcpy(ffiInput.o_tilde, input.inputTuple.O_tilde.data.data(), 32);
-        std::memcpy(ffiInput.o_tilde + 32, input.inputTuple.O_tilde.data.data(), 32);
-        std::memcpy(ffiInput.i_tilde, input.inputTuple.I_tilde.data.data(), 32);
-        std::memcpy(ffiInput.i_tilde + 32, input.inputTuple.I_tilde.data.data(), 32);
-        std::memcpy(ffiInput.r, input.inputTuple.R.data.data(), 32);
-        std::memcpy(ffiInput.r + 32, input.inputTuple.R.data.data(), 32);
-        std::memcpy(ffiInput.c_tilde, input.inputTuple.C_tilde.data.data(), 32);
-        std::memcpy(ffiInput.c_tilde + 32, input.inputTuple.C_tilde.data.data(), 32);
-
-        if (!verifier.Verify(ffiInput, input.membershipProof.proofData)) {
-            return false;
-        }
-    }
-
-    return true;
+    // Single-layer tree: fcmp_prove_full produces one-layer proofs, and
+    // GenerateFullProof refuses to build anything else rather than proving
+    // against the wrong root.
+    return verifier.VerifyFull(input.membershipProof.proofData,
+                               key_image, c_tilde, messageHash, /*num_layers=*/1);
 }
 
 bool VerifyFcmpKeyImageUnspent(const CFcmpInput& input) {

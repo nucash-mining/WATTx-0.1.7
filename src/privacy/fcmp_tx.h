@@ -210,10 +210,14 @@ struct CFcmpInput {
     CFcmpInput() = default;
 
     bool IsValid() const {
+        // O~, I~, R and the SA+L signature live INSIDE the membership proof and
+        // are read from it by fcmp_verify_full. Requiring hand-supplied copies
+        // here would demand values that can drift from what was actually proven;
+        // what must be present is the key image, the pseudo-output C~, and the
+        // proof itself, which are exactly what verification consumes.
         return keyImage.IsValid() &&
-               inputTuple.IsValid() &&
-               membershipProof.IsValid() &&
-               salSignature.IsValid();
+               pseudoOutput.IsValid() &&
+               membershipProof.IsValid();
     }
 
     SERIALIZE_METHODS(CFcmpInput, obj) {
