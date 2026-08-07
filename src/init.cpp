@@ -2173,8 +2173,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         // Not fatal - privacy features will be unavailable
     }
 
-    // Initialize FCMP consensus state (curve tree, key image tracking)
-    if (!privacy::InitializeFcmpConsensus(args.GetDataDirNet())) {
+    // Initialize FCMP consensus state (curve tree, key image tracking).
+    //
+    // Wiped alongside the chainstate on a reindex. Both the key image database
+    // and the curve tree are built by ConnectBlock, so replaying the chain over
+    // surviving state rejects the first shielded spend as a double spend and
+    // would otherwise append every note to the tree a second time -- leaving a
+    // root that no existing proof verifies against.
+    if (!privacy::InitializeFcmpConsensus(args.GetDataDirNet(),
+                                          /*wipe=*/do_reindex || do_reindex_chainstate)) {
         LogPrintf("Warning: FCMP consensus initialization failed\n");
         // Not fatal - FCMP features will be unavailable until activated
     }

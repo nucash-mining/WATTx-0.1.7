@@ -116,6 +116,11 @@ target_include_directories(test_curvetree
 target_link_libraries(test_curvetree
     PRIVATE
         bitcoin_crypto
+        # curve_tree_hash.cpp logs, and hashes through the Rust FFI. Both were
+        # added by the Selene/Helios port; without them this target does not
+        # link, which is how it went stale unnoticed.
+        bitcoin_util
+        wattx_fcmp
         leveldb
         ${SODIUM_LIBRARIES}
 )

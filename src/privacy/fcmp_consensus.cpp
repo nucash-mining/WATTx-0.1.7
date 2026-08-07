@@ -145,7 +145,7 @@ static std::unique_ptr<CFcmpConsensusState> g_fcmpState;
 CFcmpConsensusState::CFcmpConsensusState() = default;
 CFcmpConsensusState::~CFcmpConsensusState() = default;
 
-bool CFcmpConsensusState::Initialize(const fs::path& datadir, size_t cacheSize)
+bool CFcmpConsensusState::Initialize(const fs::path& datadir, size_t cacheSize, bool wipe)
 {
     LOCK(cs_fcmp);
 
@@ -157,16 +157,21 @@ bool CFcmpConsensusState::Initialize(const fs::path& datadir, size_t cacheSize)
         // Initialize key image database
         fs::path keyImagePath = datadir / "fcmp" / "keyimages";
         fs::create_directories(keyImagePath);
-        m_keyImageDB = std::make_unique<CFcmpKeyImageDB>(keyImagePath, cacheSize / 2);
+        m_keyImageDB = std::make_unique<CFcmpKeyImageDB>(keyImagePath, cacheSize / 2,
+                                                        /*fMemory=*/false, /*fWipe=*/wipe);
 
         // Initialize curve tree with persistent LevelDB storage
         fs::path treeDbPath = datadir / "fcmp" / "curvetree";
         fs::create_directories(treeDbPath);
-        m_treeStorage = std::make_shared<curvetree::LevelDBTreeStorage>(treeDbPath);
+        m_treeStorage = std::make_shared<curvetree::LevelDBTreeStorage>(treeDbPath, wipe);
         m_curveTree = std::make_shared<curvetree::CurveTree>(m_treeStorage);
 
         m_initialized = true;
 
+        if (wipe) {
+            LogPrintf("FCMP: persisted state wiped; it will be rebuilt as blocks "
+                      "are revalidated\n");
+        }
         LogPrintf("FCMP: Consensus state initialized. Tree size: %lu outputs\n",
                   m_curveTree->GetOutputCount());
 
@@ -901,10 +906,10 @@ CFcmpConsensusState& GetFcmpState()
     return *g_fcmpState;
 }
 
-bool InitializeFcmpConsensus(const fs::path& datadir)
+bool InitializeFcmpConsensus(const fs::path& datadir, bool wipe)
 {
     g_fcmpState = std::make_unique<CFcmpConsensusState>();
-    return g_fcmpState->Initialize(datadir);
+    return g_fcmpState->Initialize(datadir, (1 << 23), wipe);
 }
 
 void ShutdownFcmpConsensus()

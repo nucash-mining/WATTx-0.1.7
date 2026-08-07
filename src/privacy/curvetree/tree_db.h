@@ -27,8 +27,13 @@ namespace curvetree {
  */
 class LevelDBTreeStorage : public ITreeStorage {
 public:
-    // Open or create database at path
-    explicit LevelDBTreeStorage(const std::filesystem::path& db_path);
+    // Open or create database at path.
+    //
+    // @param wipe destroy any existing database first. Required when the chain
+    //        is being revalidated from scratch (-reindex): the tree is rebuilt
+    //        block by block, so keeping the old contents would append every
+    //        output a second time and produce a root that matches no proof.
+    explicit LevelDBTreeStorage(const std::filesystem::path& db_path, bool wipe = false);
 
     ~LevelDBTreeStorage() override;
 

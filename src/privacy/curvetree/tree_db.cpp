@@ -5,6 +5,7 @@
 #include <privacy/curvetree/tree_db.h>
 
 #include <leveldb/cache.h>
+#include <leveldb/db.h>
 #include <leveldb/filter_policy.h>
 
 #include <cstring>
@@ -21,11 +22,15 @@ constexpr char PREFIX_METADATA = 'M';
 // LevelDBTreeStorage Implementation
 // ============================================================================
 
-LevelDBTreeStorage::LevelDBTreeStorage(const std::filesystem::path& db_path)
+LevelDBTreeStorage::LevelDBTreeStorage(const std::filesystem::path& db_path, bool wipe)
     : m_in_batch(false)
     , m_cached_output_count(0)
     , m_output_count_dirty(true)
 {
+    if (wipe) {
+        leveldb::DestroyDB(db_path.string(), leveldb::Options());
+    }
+
     leveldb::Options options;
     options.create_if_missing = true;
     options.max_open_files = 64;

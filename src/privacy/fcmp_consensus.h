@@ -134,7 +134,13 @@ public:
     ~CFcmpConsensusState();
 
     // Initialization
-    bool Initialize(const fs::path& datadir, size_t cacheSize = (1 << 23));
+    //! @param wipe discard any persisted FCMP state and rebuild it from the
+    //!        chain. MUST be set whenever the chain itself is being revalidated
+    //!        from scratch (-reindex / -reindex-chainstate): the key image
+    //!        database and the curve tree are written by ConnectBlock, so
+    //!        replaying blocks against surviving state makes every shielded
+    //!        spend look like a double spend and appends every note twice.
+    bool Initialize(const fs::path& datadir, size_t cacheSize = (1 << 23), bool wipe = false);
     void Shutdown();
     bool IsInitialized() const { return m_initialized; }
 
@@ -265,7 +271,7 @@ CFcmpConsensusState& GetFcmpState();
 /**
  * @brief Initialize FCMP consensus (called during node startup)
  */
-bool InitializeFcmpConsensus(const fs::path& datadir);
+bool InitializeFcmpConsensus(const fs::path& datadir, bool wipe = false);
 
 /**
  * @brief Shutdown FCMP consensus (called during node shutdown)

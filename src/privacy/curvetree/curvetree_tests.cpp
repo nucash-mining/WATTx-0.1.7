@@ -5,10 +5,16 @@
 #include <privacy/curvetree/curve_tree.h>
 #include <privacy/curvetree/tree_db.h>
 
+#include <util/translation.h>
+
 #include <iostream>
 #include <cassert>
 #include <filesystem>
 #include <random>
+
+// This binary links bitcoin_common, which expects the translation hook every
+// Bitcoin Core executable defines. Without it the target does not link.
+const TranslateFn G_TRANSLATION_FUN{nullptr};
 
 using namespace curvetree;
 using namespace ed25519;
@@ -32,6 +38,22 @@ std::vector<OutputTuple> MakeRandomOutputs(size_t count) {
         outputs.push_back(MakeRandomOutput());
     }
     return outputs;
+}
+
+// The tree's root and node hashes are curve-TAGGED TreeHash values, not bare
+// ed25519 points: hashing happens on the Selene/Helios cycle, where identical
+// bytes are different values on each curve. These helpers keep the tests honest
+// about that instead of dropping the tag.
+// A comma inside a template argument would be read as a second macro argument
+// by assert(), so the zero value gets a name.
+static const std::array<uint8_t, 32> ZERO_HASH_BYTES{};
+
+static TreeHash RandomTreeHash(TreeCurve curve = TreeCurve::SELENE) {
+    TreeHash h;
+    h.curve = curve;
+    const auto bytes = Scalar::Random().GetBytes();
+    std::copy(bytes.begin(), bytes.end(), h.bytes.begin());
+    return h;
 }
 
 // ============================================================================
@@ -92,10 +114,25 @@ void test_tree_branch_serialization() {
     TreeBranch branch;
     branch.leaf_index = 12345;
 
-    // Add some layers
-    branch.layers.push_back({Scalar::Random(), Scalar::Random(), Scalar::Random()});
-    branch.layers.push_back({Scalar::Random(), Scalar::Random()});
-    branch.layers.push_back({Scalar::Random()});
+    // Add some layers.
+    //
+    // Layers hold curve-TAGGED hashes, not scalars: the tree hashes on the
+    // Selene/Helios cycle, where the same 32 bytes are a different value on each
+    // curve, so the tag is part of the data and must survive a round trip. This
+    // file had not been rebuilt since that change.
+    auto layer_hash = [](TreeCurve curve) {
+        TreeHash h;
+        h.curve = curve;
+        const auto bytes = Scalar::Random().GetBytes();
+        std::copy(bytes.begin(), bytes.end(), h.bytes.begin());
+        return h;
+    };
+    branch.layers.push_back({layer_hash(TreeCurve::SELENE),
+                             layer_hash(TreeCurve::HELIOS),
+                             layer_hash(TreeCurve::SELENE)});
+    branch.layers.push_back({layer_hash(TreeCurve::HELIOS),
+                             layer_hash(TreeCurve::SELENE)});
+    branch.layers.push_back({layer_hash(TreeCurve::HELIOS)});
 
     // Serialize and deserialize
     auto serialized = branch.Serialize();
@@ -126,7 +163,7 @@ void test_memory_storage_basic() {
 
     // Store and retrieve node
     TreeIndex idx(1, 42);
-    TreeNode node(Point::Random(), 5);
+    TreeNode node(RandomTreeHash(), 5);
 
     assert(storage.StoreNode(idx, node));
 
@@ -174,9 +211,10 @@ void test_curve_tree_empty() {
     assert(tree.GetOutputCount() == 0);
     assert(tree.GetDepth() == 0);
 
-    // Root of empty tree is the hash init point
-    Point root = tree.GetRoot();
-    assert(root == tree.GetHasher().GetInit());
+    // An empty tree has no root. It used to return the hasher's init point,
+    // which looked like a plausible root and hid a tree that contained nothing.
+    TreeHash root = tree.GetRoot();
+    assert(root.bytes == ZERO_HASH_BYTES);
 
     std::cout << "  - Empty tree: OK" << std::endl;
 }
@@ -199,8 +237,8 @@ void test_curve_tree_single_output() {
     assert(retrieved.has_value());
     assert(*retrieved == output);
 
-    // Root should not be identity
-    assert(!tree.GetRoot().IsIdentity());
+    // A populated tree must have a non-zero root
+    assert(tree.GetRoot().bytes != ZERO_HASH_BYTES);
 
     // Verify integrity
     assert(tree.VerifyIntegrity());
@@ -254,8 +292,8 @@ void test_curve_tree_large_batch() {
     assert(tree.VerifyIntegrity());
 
     // Root should be deterministic
-    Point root1 = tree.GetRoot();
-    Point root2 = tree.GetRoot();
+    TreeHash root1 = tree.GetRoot();
+    TreeHash root2 = tree.GetRoot();
     assert(root1 == root2);
 
     std::cout << "  - Large batch (" << num_outputs << " outputs): OK" << std::endl;
@@ -295,13 +333,13 @@ void test_curve_tree_rebuild() {
     auto outputs = MakeRandomOutputs(num_outputs);
     tree.AddOutputs(outputs);
 
-    Point original_root = tree.GetRoot();
+    TreeHash original_root = tree.GetRoot();
 
     // Rebuild tree
     assert(tree.Rebuild());
 
     // Root should be the same
-    Point rebuilt_root = tree.GetRoot();
+    TreeHash rebuilt_root = tree.GetRoot();
     assert(original_root == rebuilt_root);
 
     // Integrity should still pass
@@ -345,7 +383,7 @@ void test_curve_tree_incremental() {
     CurveTree tree;
 
     // Add outputs one by one
-    std::vector<Point> roots;
+    std::vector<TreeHash> roots;
     for (int i = 0; i < 20; ++i) {
         tree.AddOutput(MakeRandomOutput());
         roots.push_back(tree.GetRoot());
@@ -417,7 +455,7 @@ void test_leveldb_storage() {
 
         // Node operations
         TreeIndex idx(1, 42);
-        TreeNode node(Point::Random(), 5);
+        TreeNode node(RandomTreeHash(), 5);
         assert(storage->StoreNode(idx, node));
 
         auto retrieved_node = storage->GetNode(idx);
@@ -504,8 +542,8 @@ void test_leveldb_persistence() {
             tree.Rebuild();
 
             // Verify root is not identity (tree was built)
-            Point root = tree.GetRoot();
-            assert(!root.IsIdentity());
+            TreeHash root = tree.GetRoot();
+            assert(root.bytes != ZERO_HASH_BYTES);
         }
 
         std::cout << "  - Persistence: OK" << std::endl;

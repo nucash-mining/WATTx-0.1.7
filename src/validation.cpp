@@ -4070,6 +4070,35 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
 
         nInputs += tx.vin.size();
 
+        // WATTx FCMP: validate shielded transactions HERE, in block validation.
+        //
+        // These two checks -- transaction structure, and then membership proofs,
+        // range proofs and the pool balance -- previously ran ONLY from
+        // MemPoolAccept::PreChecks. A block-producing node does not go through the
+        // mempool, so anyone able to build a block could include a shielded
+        // transaction with a forged membership proof, unbacked commitments, or no
+        // range proof at all, and every node would accept it: unlimited shielded
+        // mint, the DASH/Particl/Ghost failure class. ConnectBlock caught only
+        // double-spent key images.
+        //
+        // Placed before the inputs are consumed below, because the pool delta is
+        // read from the coins this transaction spends. Run for the coinbase too:
+        // a coinbase can pay into the pool, and a note claiming more than it paid
+        // would drain the shielded set on redemption.
+        //
+        // Cost is real -- verifying an FCMP proof is not cheap -- but a rule only
+        // the mempool enforces is not a consensus rule.
+        if (privacy::IsFcmpStateAvailable() && privacy::GetFcmpState().IsInitialized()) {
+            TxValidationState fcmp_state;
+            if (!privacy::GetFcmpState().CheckFcmpTransaction(tx, fcmp_state) ||
+                !privacy::GetFcmpState().CheckFcmpInputs(tx, fcmp_state, view, pindex->nHeight)) {
+                state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
+                              fcmp_state.GetRejectReason(),
+                              fcmp_state.GetDebugMessage() + " in transaction " + tx.GetHash().ToString());
+                break;
+            }
+        }
+
         if (!tx.IsCoinBase())
         {
             CAmount txfee = 0;
