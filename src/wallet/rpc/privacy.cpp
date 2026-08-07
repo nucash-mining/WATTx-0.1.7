@@ -16,6 +16,7 @@
 #include <wallet/fcmp_wallet.h>
 #include <privacy/privacy.h>
 #include <privacy/curvetree/curve_tree.h>
+#include <privacy/fcmp_consensus.h>
 #include <key_io.h>
 #include <util/strencodings.h>
 #include <util/moneystr.h>
@@ -694,20 +695,21 @@ static RPCHelpMan shieldfcmp()
             // Create recipient for the OP_RETURN output (0 value)
             CRecipient opReturnRecipient{CNoDestination{opReturnScript}, 0, false};
 
-            // Create recipient for the shielded value
-            // The shielded amount is sent to a one-time address derived from the stealth address
-            // In FCMP, this creates a UTXO that can only be spent with a valid membership proof
-            auto destResult = const_cast<CWallet*>(pwallet.get())->GetNewDestination(OutputType::BECH32, "fcmp_shield");
-            if (!destResult) {
-                throw JSONRPCError(RPC_WALLET_ERROR,
-                    strprintf("Failed to generate shield destination: %s", util::ErrorString(destResult).original));
-            }
-            CTxDestination shieldDest = *destResult;
-
-            // The shielded amount goes to a wallet-controlled address
-            // The OP_RETURN commitment proves ownership of the shielded value
-            // When spending, the FCMP proof demonstrates membership without revealing which output
-            CRecipient shieldRecipient{shieldDest, amount, false};
+            // Pay the shielded value INTO THE SHIELDED POOL.
+            //
+            // This previously paid to an ordinary wallet-controlled bech32
+            // address and additionally published the note. The transparent coin
+            // therefore stayed spendable while the note claimed the same value:
+            // the shielded set had no backing at all, and the note entered the
+            // curve tree for free. Anyone could mint a note for any amount.
+            //
+            // Paying into the pool script is what makes the note real. The pool's
+            // UTXOs ARE the shielded supply, so shielded value is pinned to
+            // transparent value that ordinary consensus has already conserved,
+            // and the tree only accepts notes from a transaction that paid for
+            // them (see CFcmpConsensusState::ConnectBlock).
+            CScript poolScript = privacy::GetShieldedPoolScript();
+            CRecipient shieldRecipient{CNoDestination{poolScript}, amount, false};
 
             // Build recipients list
             std::vector<CRecipient> recipients;
