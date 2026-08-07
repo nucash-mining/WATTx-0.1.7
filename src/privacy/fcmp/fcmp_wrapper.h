@@ -6,6 +6,8 @@
 #define WATTX_PRIVACY_FCMP_WRAPPER_H
 
 #include <privacy/fcmp/fcmp_ffi.h>
+#include <uint256.h>
+#include <array>
 #include <privacy/ed25519/ed25519_types.h>
 #include <privacy/curvetree/curve_tree.h>
 
@@ -96,6 +98,34 @@ public:
     );
 
     /**
+     * Generate a REAL FCMP++ membership proof over the output's actual branch.
+     *
+     * Unlike GenerateProof (which calls the Schnorr-sigma scaffold and proves
+     * nothing about C), this goes through fcmp_prove_full: the audited prover
+     * that binds the re-randomised commitment to the leaf it came from. Without
+     * that binding an attacker can present any C~ they like beside a valid
+     * membership proof, and value conservation becomes unenforceable.
+     *
+     * @param leaf_index   index of the output in the tree
+     * @param x, y         spend key components satisfying O = x*G + y*T
+     * @param signable_tx_hash  message the SA+L signature commits to
+     * @param key_image_out     32-byte key image L = x*I
+     * @param c_tilde_out       32-byte pseudo-out C~ = C + r_c*G
+     * @param c_blind_out       32-byte r_c -- SECRET, needed to balance
+     *                          blindings (b~ = b + r_c); never publish it
+     * @throws FcmpError on failure
+     */
+    std::vector<uint8_t> GenerateFullProof(
+        uint64_t leaf_index,
+        const ed25519::Scalar& x,
+        const ed25519::Scalar& y,
+        const uint256& signable_tx_hash,
+        std::array<uint8_t, 32>& key_image_out,
+        std::array<uint8_t, 32>& c_tilde_out,
+        std::array<uint8_t, 32>& c_blind_out
+    );
+
+    /**
      * Estimate the proof size for verification buffer allocation
      */
     size_t EstimateProofSize(uint32_t num_inputs = 1) const {
@@ -115,7 +145,7 @@ public:
     /**
      * Create a verifier with the given tree root
      */
-    explicit FcmpVerifier(const ed25519::Point& tree_root)
+    explicit FcmpVerifier(const curvetree::TreeHash& tree_root)
         : m_tree_root(tree_root) {}
 
     /**
@@ -130,12 +160,21 @@ public:
     /**
      * Update the tree root (e.g., after new blocks)
      */
-    void SetTreeRoot(const ed25519::Point& root) {
+    void SetTreeRoot(const curvetree::TreeHash& root) {
         m_tree_root = root;
     }
 
+    /**
+     * Verify a proof produced by GenerateFullProof against this root.
+     */
+    bool VerifyFull(const std::vector<uint8_t>& proof,
+                    const std::array<uint8_t, 32>& key_image,
+                    const std::array<uint8_t, 32>& c_tilde,
+                    const uint256& signable_tx_hash,
+                    size_t num_layers) const;
+
 private:
-    ed25519::Point m_tree_root;
+    curvetree::TreeHash m_tree_root;
 };
 
 // ============================================================================

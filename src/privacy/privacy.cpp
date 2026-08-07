@@ -405,7 +405,7 @@ bool CPrivacyTransaction::VerifyFcmp() const
         LogPrintf("FCMP Verify: FAILED - membership proof invalid\n");
         return false;
     }
-    ed25519::Point treeRoot = fcmpInputs[0].membershipProof.treeRoot;
+    const curvetree::TreeHash treeRoot = fcmpInputs[0].membershipProof.treeRoot;
 
     // 5. Batch verify all FCMP inputs
     if (!BatchVerifyFcmpInputs(fcmpInputs, treeRoot, txHash)) {

@@ -144,7 +144,7 @@ public:
     /**
      * @brief Get current tree root
      */
-    ed25519::Point GetTreeRoot() const;
+    curvetree::TreeHash GetTreeRoot() const;
 
     /**
      * @brief Get tree output count

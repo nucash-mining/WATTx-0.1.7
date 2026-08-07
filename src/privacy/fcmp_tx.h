@@ -108,19 +108,33 @@ struct CFcmpProof {
     // Serialized proof bytes (actual proof from Rust library)
     std::vector<uint8_t> proofData;
 
-    // Tree root at time of proof generation (for verification)
-    ed25519::Point treeRoot;
+    // Tree root at time of proof generation (for verification).
+    //
+    // Curve-TAGGED. An FCMP++ curve tree alternates Selene and Helios, and the
+    // same 32 bytes are a valid point on both curves that hash differently, so
+    // a root without its curve is ambiguous. This was an ed25519::Point, which
+    // could only ever name a root from the old ed25519 -> ed25519 tree -- a
+    // hash that is not injective and cannot be opened in the proving circuit.
+    //
+    // CONSENSUS FORMAT CHANGE. Safe to make now and only now: getfcmpinfo
+    // reports tree_size 0, so no shielded output has ever existed on any WATTx
+    // chain and there is no proof in existence carrying the old field. The
+    // window closes the moment a real shielded user appears.
+    curvetree::TreeHash treeRoot;
 
-    // Proof version for future upgrades
-    uint8_t version{1};
+    // Proof version for future upgrades. Bumped to 2 with the curve-tagged root
+    // so a v1 proof is rejected rather than reinterpreted.
+    uint8_t version{2};
 
     CFcmpProof() = default;
 
-    explicit CFcmpProof(std::vector<uint8_t> data, const ed25519::Point& root)
+    explicit CFcmpProof(std::vector<uint8_t> data, const curvetree::TreeHash& root)
         : proofData(std::move(data)), treeRoot(root) {}
 
     bool IsValid() const {
-        return !proofData.empty() && treeRoot.IsValid();
+        // A zero root is what an empty tree yields; it names nothing.
+        static const curvetree::TreeHash empty{};
+        return !proofData.empty() && version >= 2 && treeRoot != empty;
     }
 
     size_t GetSize() const {
@@ -128,7 +142,11 @@ struct CFcmpProof {
     }
 
     SERIALIZE_METHODS(CFcmpProof, obj) {
-        READWRITE(obj.version, obj.proofData, obj.treeRoot);
+        READWRITE(obj.version, obj.proofData);
+        uint8_t curve = static_cast<uint8_t>(obj.treeRoot.curve);
+        READWRITE(curve);
+        SER_READ(obj, obj.treeRoot.curve = static_cast<curvetree::TreeCurve>(curve));
+        READWRITE(obj.treeRoot.bytes);
     }
 };
 
@@ -366,7 +384,7 @@ private:
  */
 bool VerifyFcmpInput(
     const CFcmpInput& input,
-    const ed25519::Point& treeRoot,
+    const curvetree::TreeHash& treeRoot,
     const uint256& messageHash
 );
 
@@ -405,7 +423,7 @@ bool VerifyFcmpBalance(
  */
 bool BatchVerifyFcmpInputs(
     const std::vector<CFcmpInput>& inputs,
-    const ed25519::Point& treeRoot,
+    const curvetree::TreeHash& treeRoot,
     const uint256& messageHash
 );
 

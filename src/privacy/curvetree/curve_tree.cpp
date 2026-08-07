@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <privacy/curvetree/curve_tree.h>
+#include <privacy/curvetree/curve_tree_hash.h>
 
 #include <algorithm>
 #include <cassert>
@@ -102,10 +103,11 @@ std::vector<uint8_t> TreeBranch::Serialize() const {
             data.push_back((num_elements >> (i * 8)) & 0xFF);
         }
 
-        // Elements (32 bytes each)
-        for (const auto& scalar : layer) {
-            auto bytes = scalar.GetBytes();
-            data.insert(data.end(), bytes.begin(), bytes.end());
+        // Elements: 1 curve tag + 32 bytes each. The tag is not optional --
+        // the same bytes are a valid point on both curves and hash differently.
+        for (const auto& h : layer) {
+            data.push_back(static_cast<uint8_t>(h.curve));
+            data.insert(data.end(), h.bytes.begin(), h.bytes.end());
         }
     }
 
@@ -152,11 +154,19 @@ std::optional<TreeBranch> TreeBranch::Deserialize(const std::vector<uint8_t>& da
             return std::nullopt;
         }
 
-        std::vector<Scalar> layer;
+        std::vector<TreeHash> layer;
         layer.reserve(num_elements);
         for (uint32_t e = 0; e < num_elements; ++e) {
-            layer.emplace_back(data.data() + offset);
-            offset += 32;
+            TreeHash h;
+            const uint8_t tag = data[offset];
+            if (tag != static_cast<uint8_t>(TreeCurve::SELENE) &&
+                tag != static_cast<uint8_t>(TreeCurve::HELIOS)) {
+                return std::nullopt;
+            }
+            h.curve = static_cast<TreeCurve>(tag);
+            std::memcpy(h.bytes.data(), data.data() + offset + 1, 32);
+            offset += 33;
+            layer.push_back(h);
         }
         branch.layers.push_back(std::move(layer));
     }
@@ -222,7 +232,7 @@ std::optional<std::vector<uint8_t>> MemoryTreeStorage::GetMetadata(const std::st
 CurveTree::CurveTree(std::shared_ptr<ITreeStorage> storage)
     : m_storage(std::move(storage))
     , m_hasher("WATTx_CurveTree_v1")
-    , m_cached_root(Point::Identity())
+    , m_cached_root(TreeHash{})
     , m_root_dirty(true)
     , m_output_count(0)
     , m_depth(0)
@@ -236,9 +246,11 @@ CurveTree::CurveTree()
 {
 }
 
-Point CurveTree::GetRoot() const {
+TreeHash CurveTree::GetRoot() const {
     if (m_output_count == 0) {
-        return m_hasher.GetInit();
+        // An empty tree has no root. A placeholder here would look like a real
+        // root and match nothing.
+        return TreeHash{};
     }
 
     if (m_root_dirty) {
@@ -248,7 +260,7 @@ Point CurveTree::GetRoot() const {
         if (node) {
             m_cached_root = node->hash;
         } else {
-            m_cached_root = m_hasher.GetInit();
+            m_cached_root = TreeHash{};
         }
         m_root_dirty = false;
     }
@@ -384,7 +396,7 @@ bool CurveTree::RemoveLastN(uint64_t count) {
 
         // Recompute affected leaf nodes
         for (uint64_t i = first_affected_leaf; i < num_leaf_commits; ++i) {
-            Point hash = ComputeLeafNode(i);
+            TreeHash hash = ComputeLeafNode(i);
             uint64_t start = i * TreeConfig::LEAF_BRANCH_WIDTH;
             uint64_t end = std::min(start + TreeConfig::LEAF_BRANCH_WIDTH, m_output_count);
             m_storage->StoreNode(TreeIndex(0, i), TreeNode(hash, end - start));
@@ -404,7 +416,7 @@ bool CurveTree::RemoveLastN(uint64_t count) {
             for (uint64_t i = 0; i < nodes_at_layer; ++i) {
                 auto children = GetChildren(TreeIndex(layer, i));
                 if (!children.empty()) {
-                    Point hash = ComputeNodeHash(children);
+                    TreeHash hash = ComputeNodeHash(children);
                     m_storage->StoreNode(TreeIndex(layer, i), TreeNode(hash, children.size()));
                 }
             }
@@ -425,30 +437,22 @@ bool CurveTree::RemoveLastN(uint64_t count) {
     return true;
 }
 
-Point CurveTree::ComputeLeafCommitment(const std::vector<Scalar>& elements) const {
-    return m_hasher.Hash(elements);
-}
-
-Point CurveTree::ComputeNodeHash(const std::vector<Point>& children) const {
+TreeHash CurveTree::ComputeNodeHash(const std::vector<TreeHash>& children) const {
     if (children.empty()) {
-        return m_hasher.GetInit();
+        return TreeHash{};
     }
 
-    // Convert points to scalars for hashing
-    // We use the x-coordinate of each point
-    std::vector<Scalar> scalars;
-    scalars.reserve(children.size());
-
-    for (const auto& child : children) {
-        // Use first 32 bytes of point as scalar
-        scalars.push_back(Scalar::FromBytesModOrder(child.data.data(), 32));
-    }
-
-    return m_hasher.Hash(scalars);
+    // Hash through the fcmp++ crate, which alternates Selene <-> Helios. The
+    // previous implementation reduced each child's compressed bytes modulo the
+    // ed25519 group order and Pedersen-hashed the result: not injective, and
+    // not openable inside the proving circuit, so proofs over it proved nothing.
+    auto h = HashBranch(children);
+    if (!h) return TreeHash{};
+    return *h;
 }
 
-std::vector<Point> CurveTree::GetChildren(const TreeIndex& parent) const {
-    std::vector<Point> children;
+std::vector<TreeHash> CurveTree::GetChildren(const TreeIndex& parent) const {
+    std::vector<TreeHash> children;
 
     if (parent.layer == 1) {
         // Layer 1 - children are leaf commitments (layer 0 nodes)
@@ -497,26 +501,27 @@ std::vector<Point> CurveTree::GetChildren(const TreeIndex& parent) const {
     return children;
 }
 
-Point CurveTree::ComputeLeafNode(uint64_t leaf_index) const {
-    // Get all outputs for this leaf commitment
+TreeHash CurveTree::ComputeLeafNode(uint64_t leaf_index) const {
+    // Hash this leaf branch through the audited fcmp++ leaf hash, which turns
+    // each output into six Selene scalars (x and y of O, I and C) -- both
+    // coordinates, unlike internal layers which use x only.
     uint64_t start = leaf_index * TreeConfig::LEAF_BRANCH_WIDTH;
     uint64_t end = std::min(start + TreeConfig::LEAF_BRANCH_WIDTH, m_output_count);
 
-    // Concatenate all field elements from outputs in this leaf
-    std::vector<Scalar> all_elements;
+    std::vector<OutputTuple> outs;
+    outs.reserve(end - start);
     for (uint64_t i = start; i < end; ++i) {
         auto output = m_storage->GetOutput(i);
-        if (output) {
-            auto elements = output->ToFieldElements();
-            all_elements.insert(all_elements.end(), elements.begin(), elements.end());
-        }
+        if (output) outs.push_back(*output);
     }
 
-    if (all_elements.empty()) {
-        return m_hasher.GetInit();
+    auto h = HashLeafBranch(outs);
+    if (!h) {
+        // No usable leaf: return an explicitly empty node rather than a hash of
+        // nothing that would be indistinguishable from a real one.
+        return TreeHash{};
     }
-
-    return m_hasher.Hash(all_elements);
+    return *h;
 }
 
 void CurveTree::UpdatePath(uint64_t leaf_index) {
@@ -526,7 +531,7 @@ void CurveTree::UpdatePath(uint64_t leaf_index) {
     // Update layer 0 (leaf commitment)
     {
         TreeIndex idx(0, leaf_commit_index);
-        Point hash = ComputeLeafNode(leaf_commit_index);
+        TreeHash hash = ComputeLeafNode(leaf_commit_index);
         // Count outputs in this leaf
         uint64_t start = leaf_commit_index * TreeConfig::LEAF_BRANCH_WIDTH;
         uint64_t end = std::min(start + TreeConfig::LEAF_BRANCH_WIDTH, m_output_count);
@@ -543,7 +548,7 @@ void CurveTree::UpdatePath(uint64_t leaf_index) {
 
             auto children = GetChildren(parent_idx);
             if (!children.empty()) {
-                Point hash = ComputeNodeHash(children);
+                TreeHash hash = ComputeNodeHash(children);
                 m_storage->StoreNode(parent_idx, TreeNode(hash, children.size()));
             }
 
@@ -565,15 +570,14 @@ std::optional<TreeBranch> CurveTree::GetBranch(uint64_t leaf_index) const {
     uint64_t start = leaf_commit_index * TreeConfig::LEAF_BRANCH_WIDTH;
     uint64_t end = std::min(start + TreeConfig::LEAF_BRANCH_WIDTH, m_output_count);
 
-    std::vector<Scalar> leaf_siblings;
+    // The leaf branch is carried as OUTPUTS, not as flattened scalars.
+    // fcmp_prove_full rebuilds the leaf hash itself and needs the outputs plus
+    // our position among them; scalars alone cannot be turned back into points.
     for (uint64_t i = start; i < end; ++i) {
         auto output = m_storage->GetOutput(i);
-        if (output) {
-            auto elements = output->ToFieldElements();
-            leaf_siblings.insert(leaf_siblings.end(), elements.begin(), elements.end());
-        }
+        if (output) branch.leaves.push_back(*output);
     }
-    branch.layers.push_back(std::move(leaf_siblings));
+    branch.index_in_leaves = leaf_index - start;
 
     // Internal layers
     uint64_t current_index = leaf_commit_index;
@@ -581,12 +585,11 @@ std::optional<TreeBranch> CurveTree::GetBranch(uint64_t leaf_index) const {
         uint64_t parent_index = current_index / TreeConfig::INTERNAL_BRANCH_WIDTH;
         uint64_t sibling_start = parent_index * TreeConfig::INTERNAL_BRANCH_WIDTH;
 
-        std::vector<Scalar> siblings;
+        // Carry the siblings as curve-tagged hashes. Reducing them to ed25519
+        // scalars (as before) discarded the curve and produced values the
+        // prover cannot use.
         auto children = GetChildren(TreeIndex(layer, parent_index));
-        for (const auto& child : children) {
-            siblings.push_back(Scalar::FromBytesModOrder(child.data.data(), 32));
-        }
-        branch.layers.push_back(std::move(siblings));
+        branch.layers.push_back(std::move(children));
 
         current_index = parent_index;
     }
@@ -595,22 +598,23 @@ std::optional<TreeBranch> CurveTree::GetBranch(uint64_t leaf_index) const {
 }
 
 bool CurveTree::VerifyBranch(const OutputTuple& output, const TreeBranch& branch,
-                             const Point& expected_root) {
-    if (branch.layers.empty()) {
+                             const TreeHash& expected_root) {
+    // A branch with no leaves names no output.
+    if (branch.leaves.empty()) {
         return false;
     }
 
-    PedersenHash hasher("WATTx_CurveTree_v1");
+    // Recompute the branch through the real curve-tree hashing rather than the
+    // old ed25519 Pedersen hash, which could not be opened in the proving
+    // circuit and so verified nothing meaningful.
+    auto leaf = HashLeafBranch(branch.leaves);
+    if (!leaf) return false;
+    TreeHash current = *leaf;
 
-    // Verify leaf layer
-    auto elements = output.ToFieldElements();
-    Point current = hasher.Hash(branch.layers[0]);
-
-    // Walk up the tree
-    for (size_t layer = 1; layer < branch.layers.size(); ++layer) {
-        // Hash current with siblings at this layer
-        std::vector<Scalar> layer_elements = branch.layers[layer];
-        current = hasher.Hash(layer_elements);
+    for (size_t layer = 0; layer < branch.layers.size(); ++layer) {
+        auto h = HashBranch(branch.layers[layer]);
+        if (!h) return false;
+        current = *h;
     }
 
     return current == expected_root;
@@ -628,7 +632,7 @@ bool CurveTree::Rebuild() {
                                  TreeConfig::LEAF_BRANCH_WIDTH;
 
     for (uint64_t i = 0; i < num_leaf_commits; ++i) {
-        Point hash = ComputeLeafNode(i);
+        TreeHash hash = ComputeLeafNode(i);
         uint64_t start = i * TreeConfig::LEAF_BRANCH_WIDTH;
         uint64_t end = std::min(start + TreeConfig::LEAF_BRANCH_WIDTH, m_output_count);
         m_storage->StoreNode(TreeIndex(0, i), TreeNode(hash, end - start));
@@ -643,7 +647,7 @@ bool CurveTree::Rebuild() {
         for (uint64_t i = 0; i < nodes_at_layer; ++i) {
             auto children = GetChildren(TreeIndex(layer, i));
             if (!children.empty()) {
-                Point hash = ComputeNodeHash(children);
+                TreeHash hash = ComputeNodeHash(children);
                 m_storage->StoreNode(TreeIndex(layer, i), TreeNode(hash, children.size()));
             }
         }
@@ -673,7 +677,7 @@ bool CurveTree::VerifyIntegrity() const {
             return false;
         }
 
-        Point expected = ComputeLeafNode(i);
+        TreeHash expected = ComputeLeafNode(i);
         if (stored->hash != expected) {
             return false;
         }
@@ -692,7 +696,7 @@ bool CurveTree::VerifyIntegrity() const {
             }
 
             auto children = GetChildren(TreeIndex(layer, i));
-            Point expected = ComputeNodeHash(children);
+            TreeHash expected = ComputeNodeHash(children);
             if (stored->hash != expected) {
                 return false;
             }

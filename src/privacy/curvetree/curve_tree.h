@@ -11,11 +11,32 @@
 #include <cstdint>
 #include <map>
 #include <memory>
+#include <array>
 #include <optional>
 #include <vector>
 #include <functional>
 
 namespace curvetree {
+
+//! Which curve a tree node lives on. Defined here (rather than in
+//! curve_tree_hash.h) because TreeNode needs it and that header includes this
+//! one.
+enum class TreeCurve : uint8_t {
+    SELENE = 1,
+    HELIOS = 2,
+};
+
+//! A curve-tree hash: a compressed point plus the curve it belongs to.
+struct TreeHash {
+    TreeCurve curve{TreeCurve::SELENE};
+    std::array<uint8_t, 32> bytes{};
+
+    bool operator==(const TreeHash& o) const {
+        return curve == o.curve && bytes == o.bytes;
+    }
+    bool operator!=(const TreeHash& o) const { return !(*this == o); }
+};
+
 
 using ed25519::Scalar;
 using ed25519::Point;
@@ -109,8 +130,17 @@ struct TreeIndex {
  * Used for membership proofs.
  */
 struct TreeBranch {
-    uint64_t leaf_index;                    // Index of the leaf output
-    std::vector<std::vector<Scalar>> layers; // Sibling elements at each layer
+    uint64_t leaf_index;  // Index of the leaf output in the whole tree
+
+    //! The complete leaf branch containing our output, in tree order, and our
+    //! position within it. fcmp_prove_full consumes exactly this: the outputs
+    //! of the branch plus which one is ours. Sibling SCALARS are not enough --
+    //! the prover needs the outputs themselves to rebuild the leaf hash.
+    std::vector<OutputTuple> leaves;
+    uint64_t index_in_leaves{0};
+
+    //! Higher layers, as curve-tagged hashes. Empty for a single-layer tree.
+    std::vector<std::vector<TreeHash>> layers;
 
     TreeBranch() : leaf_index(0) {}
 
@@ -123,14 +153,24 @@ struct TreeBranch {
 };
 
 /**
- * Tree node representing either a leaf commitment or internal hash.
+ * Tree node: a curve-tree hash plus how many children it covers.
+ *
+ * The hash carries the CURVE it lives on. An FCMP++ curve tree alternates
+ * between Selene and Helios, and the same 32 bytes are a valid point on either
+ * curve that hashes differently -- so a node without its curve is ambiguous and
+ * a tree built from ambiguous nodes cannot be verified.
+ *
+ * This replaces a bare ed25519 Point. The old tree hashed ed25519 -> ed25519 by
+ * reducing compressed bytes modulo the group order, which is not injective and
+ * cannot be opened inside the proving circuit, so membership proofs over it
+ * proved nothing.
  */
 struct TreeNode {
-    Point hash;           // The Pedersen hash/commitment
+    TreeHash hash;        // Curve-tagged tree hash
     uint64_t child_count; // Number of children (for partial nodes)
 
     TreeNode() : child_count(0) {}
-    explicit TreeNode(const Point& h, uint64_t count = 0) : hash(h), child_count(count) {}
+    explicit TreeNode(const TreeHash& h, uint64_t count = 0) : hash(h), child_count(count) {}
 
     bool operator==(const TreeNode& other) const {
         return hash == other.hash && child_count == other.child_count;
@@ -222,7 +262,7 @@ public:
     // ========== Tree State ==========
 
     // Get the current tree root
-    Point GetRoot() const;
+    TreeHash GetRoot() const;
 
     // Get number of outputs in tree
     uint64_t GetOutputCount() const;
@@ -259,7 +299,7 @@ public:
 
     // Verify that a branch is valid for the given output and root
     static bool VerifyBranch(const OutputTuple& output, const TreeBranch& branch,
-                             const Point& expected_root);
+                             const TreeHash& expected_root);
 
     // ========== Tree Maintenance ==========
 
@@ -283,19 +323,18 @@ public:
 
 private:
     // Compute leaf commitment from output tuple
-    Point ComputeLeafCommitment(const std::vector<Scalar>& elements) const;
 
     // Compute leaf node (commitment for a group of outputs)
-    Point ComputeLeafNode(uint64_t leaf_index) const;
+    TreeHash ComputeLeafNode(uint64_t leaf_index) const;
 
     // Compute internal node hash from children
-    Point ComputeNodeHash(const std::vector<Point>& children) const;
+    TreeHash ComputeNodeHash(const std::vector<TreeHash>& children) const;
 
     // Update tree from leaf index up to root
     void UpdatePath(uint64_t leaf_index);
 
     // Get children of a node
-    std::vector<Point> GetChildren(const TreeIndex& parent) const;
+    std::vector<TreeHash> GetChildren(const TreeIndex& parent) const;
 
     // Calculate required depth for given output count
     static uint32_t CalculateDepth(uint64_t output_count);
@@ -307,7 +346,7 @@ private:
     PedersenHash m_hasher;
 
     // Cached tree state
-    mutable Point m_cached_root;
+    mutable TreeHash m_cached_root;
     mutable bool m_root_dirty;
     uint64_t m_output_count;
     uint32_t m_depth;

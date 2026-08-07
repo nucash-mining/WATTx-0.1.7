@@ -41,24 +41,6 @@
 
 namespace curvetree {
 
-//! Which curve a tree node lives on. A node is meaningless without this: the
-//! same 32 bytes are a valid point on either curve and hash differently.
-enum class TreeCurve : uint8_t {
-    SELENE = 1,
-    HELIOS = 2,
-};
-
-//! One node of the curve tree: a compressed point plus the curve it belongs to.
-struct TreeHash {
-    TreeCurve curve{TreeCurve::SELENE};
-    std::array<uint8_t, 32> bytes{};
-
-    bool operator==(const TreeHash& o) const {
-        return curve == o.curve && bytes == o.bytes;
-    }
-    bool operator!=(const TreeHash& o) const { return !(*this == o); }
-};
-
 //! Branch widths, read from the crate rather than hard-coded here.
 size_t LayerWidthSelene();  //!< children per Selene (C1) node
 size_t LayerWidthHelios();  //!< children per Helios (C2) node

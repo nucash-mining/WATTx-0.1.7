@@ -277,7 +277,7 @@ std::vector<CFcmpInput> CFcmpTransactionBuilder::BuildInputs() {
 
 bool VerifyFcmpInput(
     const CFcmpInput& input,
-    const ed25519::Point& treeRoot,
+    const curvetree::TreeHash& treeRoot,
     const uint256& messageHash
 ) {
     // 1. Verify input is structurally valid
@@ -286,7 +286,7 @@ bool VerifyFcmpInput(
     }
 
     // 2. Verify tree root matches proof
-    if (input.membershipProof.treeRoot.data != treeRoot.data) {
+    if (input.membershipProof.treeRoot != treeRoot) {
         return false;
     }
 
@@ -387,7 +387,7 @@ bool VerifyFcmpBalance(
 
 bool BatchVerifyFcmpInputs(
     const std::vector<CFcmpInput>& inputs,
-    const ed25519::Point& treeRoot,
+    const curvetree::TreeHash& treeRoot,
     const uint256& messageHash
 ) {
     // For now, verify individually

@@ -395,6 +395,29 @@ const int8_t *fcmp_version(void);
  */
 const int8_t *fcmp_error_string(int32_t code);
 
+/**
+ * Hash one layer of Selene points into their Helios parent.
+ *
+ * `children` is `num_children` × 32 bytes, each a compressed Selene point.
+ * `root_out` receives a 32-byte compressed Helios point.
+ */
+int32_t fcmp_hash_helios_layer(uint8_t *root_out, const uint8_t *children, uintptr_t num_children);
+
+/**
+ * Hash one layer of Helios points into their Selene parent.
+ *
+ * `children` is `num_children` × 32 bytes, each a compressed Helios point.
+ * `root_out` receives a 32-byte compressed Selene point.
+ */
+int32_t fcmp_hash_selene_layer(uint8_t *root_out, const uint8_t *children, uintptr_t num_children);
+
+/**
+ * Branch widths, so the C++ tree does not hard-code constants that live here.
+ */
+uintptr_t fcmp_layer_one_len(void);
+
+uintptr_t fcmp_layer_two_len(void);
+
 #ifdef __cplusplus
 } // extern "C"
 #endif // __cplusplus

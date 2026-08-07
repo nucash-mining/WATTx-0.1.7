@@ -564,7 +564,9 @@ static RPCHelpMan getfcmpinfo()
                 result.pushKV("tree_height", static_cast<uint64_t>(curveTree->GetDepth()));
 
                 auto root = curveTree->GetRoot();
-                result.pushKV("tree_root", HexStr(root.data));
+                result.pushKV("tree_root", HexStr(root.bytes));
+                result.pushKV("tree_root_curve",
+                              root.curve == curvetree::TreeCurve::SELENE ? "selene" : "helios");
 
                 // Estimate proof size for typical transaction
                 size_t proofSize = 1024 + curveTree->GetDepth() * 64;

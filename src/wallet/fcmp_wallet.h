@@ -377,7 +377,7 @@ public:
      * @brief Get current tree root
      * @return Tree root point
      */
-    ed25519::Point GetTreeRoot() const;
+    curvetree::TreeHash GetTreeRoot() const;
 
     // ========================================================================
     // Transaction Scanning

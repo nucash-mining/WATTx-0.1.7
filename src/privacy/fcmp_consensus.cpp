@@ -200,11 +200,11 @@ std::shared_ptr<curvetree::CurveTree> CFcmpConsensusState::GetCurveTree() const
     return m_curveTree;
 }
 
-ed25519::Point CFcmpConsensusState::GetTreeRoot() const
+curvetree::TreeHash CFcmpConsensusState::GetTreeRoot() const
 {
     LOCK(cs_fcmp);
     if (!m_curveTree) {
-        return ed25519::Point::Identity();
+        return curvetree::TreeHash{};
     }
     return m_curveTree->GetRoot();
 }
@@ -605,7 +605,7 @@ bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationSt
     }
 
     // Get current tree root for verification
-    ed25519::Point treeRoot = m_curveTree->GetRoot();
+    curvetree::TreeHash treeRoot = m_curveTree->GetRoot();
 
     // Compute message hash for signature verification
     HashWriter hasher{};
@@ -622,7 +622,7 @@ bool CFcmpConsensusState::CheckFcmpInputs(const CTransaction& tx, TxValidationSt
         }
 
         // 2. Verify membership proof matches current tree root
-        if (input.membershipProof.treeRoot.data != treeRoot.data) {
+        if (input.membershipProof.treeRoot != treeRoot) {
             return state.Invalid(TxValidationResult::TX_CONSENSUS,
                                  "fcmp-proof-stale-root",
                                  "FCMP proof uses stale tree root");

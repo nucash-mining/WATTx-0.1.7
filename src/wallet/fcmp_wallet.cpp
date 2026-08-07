@@ -806,12 +806,14 @@ void CFcmpWalletManager::SetCurveTree(std::shared_ptr<curvetree::CurveTree> tree
     m_curveTree = std::move(tree);
 }
 
-ed25519::Point CFcmpWalletManager::GetTreeRoot() const
+curvetree::TreeHash CFcmpWalletManager::GetTreeRoot() const
 {
     LOCK(cs_fcmp);
 
     if (!m_curveTree) {
-        return ed25519::Point::Identity();
+        // No tree means no root. An identity/zero value here would look like a
+        // real root and match nothing.
+        return curvetree::TreeHash{};
     }
 
     return m_curveTree->GetRoot();

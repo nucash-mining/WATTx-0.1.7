@@ -88,10 +88,18 @@ std::string LevelDBTreeStorage::MakeMetadataKey(const std::string& key) {
 
 std::string LevelDBTreeStorage::SerializeNode(const TreeNode& node) {
     std::string data;
-    data.reserve(40); // 32 bytes hash + 8 bytes count
+    data.reserve(41); // 1 byte curve + 32 bytes hash + 8 bytes count
+
+    // Curve tag FIRST. Without it the 32 bytes are ambiguous: they are a valid
+    // point on both Selene and Helios and hash differently on each, so a node
+    // read back without its curve cannot be verified against anything. The
+    // extra byte also makes the record length differ from the old 40-byte
+    // format, so a stale record is rejected outright rather than silently
+    // reinterpreted as a curve-tree node.
+    data.push_back(static_cast<char>(static_cast<uint8_t>(node.hash.curve)));
 
     // Hash
-    data.append(reinterpret_cast<const char*>(node.hash.data.data()), 32);
+    data.append(reinterpret_cast<const char*>(node.hash.bytes.data()), 32);
 
     // Child count (8 bytes, little-endian)
     for (int i = 0; i < 8; ++i) {
@@ -102,19 +110,29 @@ std::string LevelDBTreeStorage::SerializeNode(const TreeNode& node) {
 }
 
 std::optional<TreeNode> LevelDBTreeStorage::DeserializeNode(const std::string& data) {
-    if (data.size() != 40) {
+    // 40 bytes is the OLD untagged ed25519 format. Those nodes were hashed
+    // ed25519 -> ed25519, which is not a curve-tree hash at all, so they must
+    // not be loaded as if they were -- fail rather than reinterpret.
+    if (data.size() != 41) {
         return std::nullopt;
     }
 
     TreeNode node;
 
+    const uint8_t tag = static_cast<uint8_t>(data[0]);
+    if (tag != static_cast<uint8_t>(TreeCurve::SELENE) &&
+        tag != static_cast<uint8_t>(TreeCurve::HELIOS)) {
+        return std::nullopt;
+    }
+    node.hash.curve = static_cast<TreeCurve>(tag);
+
     // Hash
-    std::memcpy(node.hash.data.data(), data.data(), 32);
+    std::memcpy(node.hash.bytes.data(), data.data() + 1, 32);
 
     // Child count
     node.child_count = 0;
     for (int i = 0; i < 8; ++i) {
-        node.child_count |= static_cast<uint64_t>(static_cast<uint8_t>(data[32 + i])) << (i * 8);
+        node.child_count |= static_cast<uint64_t>(static_cast<uint8_t>(data[33 + i])) << (i * 8);
     }
 
     return node;
